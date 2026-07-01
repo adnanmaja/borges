@@ -7,7 +7,7 @@ import (
 	"net"
 )
 
-func StartServer(log *Log) {
+func StartServer(broker *Broker) {
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		panic(fmt.Sprintf("error starting server: %s", err))
@@ -21,11 +21,11 @@ func StartServer(log *Log) {
 			fmt.Println("error accepting connection: ", err)
 			continue
 		}
-		go handleClient(conn, log)
+		go handleClient(conn, broker)
 	}
 }
 
-func handleClient(conn net.Conn, b *Log) {
+func handleClient(conn net.Conn, b *Broker) {
 	defer conn.Close()
 
 	for {
@@ -42,15 +42,26 @@ func handleClient(conn net.Conn, b *Log) {
 
 		fmt.Println("[DEBUG] Command: ", commandBuf)
 
-		if commandBuf[0] == 0x01 { // produce
-			lengthBuf := make([]byte, 4)
-			io.ReadFull(conn, lengthBuf)
-			payloadLength := binary.BigEndian.Uint32(lengthBuf)
+		switch commandBuf[0] {
+		case 0x01: //produce
+			topicLenBuf := make([]byte, 2)
+			io.ReadFull(conn, topicLenBuf)
+			topicLength := binary.BigEndian.Uint16(topicLenBuf)
+			topicBuf := make([]byte, topicLength)
+			io.ReadFull(conn, topicBuf)
+			topic := string(topicBuf)
 
-			payloadBuf := make([]byte, payloadLength)
-			io.ReadFull(conn, payloadBuf)
+			payloadLenBuf := make([]byte, 4)
+			io.ReadFull(conn, payloadLenBuf)
+			payloadLength := binary.BigEndian.Uint32(payloadLenBuf)
 
-			_, err := b.Write(payloadBuf)
+			payload := make([]byte, payloadLength)
+			io.ReadFull(conn, payload)
+
+			fmt.Println("[DEBUG] Topic: ", topic)
+
+			log := b.GetOrCreateLog(topic)
+			_, err := log.Write(payload)
 
 			if err != nil {
 				conn.Write([]byte{0x01}) //success
@@ -58,12 +69,20 @@ func handleClient(conn net.Conn, b *Log) {
 				conn.Write([]byte{0x00}) // error
 			}
 
-		} else if commandBuf[0] == 0x02 {
+		case 0x02: //consume
+			topicLenBuf := make([]byte, 2)
+			io.ReadFull(conn, topicLenBuf)
+			topicLength := binary.BigEndian.Uint16(topicLenBuf)
+			topicBuf := make([]byte, topicLength)
+			io.ReadFull(conn, topicBuf)
+			topic := string(topicBuf)
+
 			offsetBuf := make([]byte, 8)
 			io.ReadFull(conn, offsetBuf)
 			offset := binary.BigEndian.Uint64(offsetBuf)
 
-			record, err := b.Read(int64(offset))
+			log := b.GetOrCreateLog(topic)
+			record, err := log.Read(int64(offset))
 			if err != nil {
 				conn.Write([]byte{0x00}) //error
 			}

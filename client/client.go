@@ -6,15 +6,34 @@ import (
 	"net"
 )
 
-func produce(conn net.Conn) {
-	payload := []byte("mini-kafka-test")
+func produce(conn net.Conn, topicStr string) {
+	payloadStr := "Anytime Anywhere"
+	fmt.Println("Producing, payload:", payloadStr)
+	payload := []byte(payloadStr)
 	payloadLen := uint32(len(payload))
 
-	// [1 byte command][4 bytes length][N bytes payload]
-	frame := make([]byte, 1+4+len(payload))
-	frame[0] = 0x01
-	binary.BigEndian.PutUint32(frame[1:5], payloadLen)
-	copy(frame[5:], payload)
+	topic := []byte(topicStr)
+	topicLen := uint16(len(topic))
+
+	// [1 byte command][2 byte topic length][topic][4 bytes length][N bytes payload]
+	totalSize := 1 + 2 + topicLen + 4 + uint16(payloadLen)
+
+	frame := make([]byte, totalSize)
+	off := 0
+
+	frame[off] = 0x01
+	off += 1
+
+	binary.BigEndian.PutUint16(frame[off:], topicLen)
+	off += 2
+
+	copy(frame[off:], topic)
+	off += len(topic)
+
+	binary.BigEndian.PutUint32(frame[off:], payloadLen)
+	off += 4
+
+	copy(frame[off:], payload)
 
 	_, err := conn.Write(frame)
 	if err != nil {
@@ -22,12 +41,28 @@ func produce(conn net.Conn) {
 	}
 }
 
-func consume(conn net.Conn) {
-	targetOffset := 80
+func consume(conn net.Conn, topicStr string) {
+	targetOffset := 0
+	fmt.Printf("Consuming, targetOffset: %d\n", targetOffset)
 
-	frame := make([]byte, 1+8)
-	frame[0] = 0x02
-	binary.BigEndian.PutUint64(frame[1:9], uint64(targetOffset))
+	topic := []byte(topicStr)
+
+	// [1 byte command][2 byte topic length][topic][8 byte target offset]
+	totalSize := 1 + 2 + len(topic) + 8
+
+	frame := make([]byte, totalSize)
+	off := 0
+
+	frame[off] = 0x02
+	off += 1
+
+	binary.BigEndian.PutUint16(frame[off:], uint16(len(topic)))
+	off += 2
+
+	copy(frame[off:], topic)
+	off += len(topic)
+
+	binary.BigEndian.PutUint64(frame[off:], uint64(targetOffset))
 
 	_, err := conn.Write(frame)
 	if err != nil {
@@ -42,8 +77,10 @@ func main() {
 	}
 	defer conn.Close()
 
-	produce(conn)
-	consume(conn)
+	topic := "song"
+
+	produce(conn, topic)
+	consume(conn, topic)
 
 	fmt.Println("Data sent! Press Enter to close client...")
 	fmt.Scanln()

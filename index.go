@@ -13,8 +13,8 @@ type Index struct {
 	absoluteOffset int64
 }
 
-func (l *Log) newIndex(offset int64) *Index {
-	filePath := fmt.Sprintf("logs/%020d.index", offset)
+func newIndex(topic string, offset int64) *Index {
+	filePath := fmt.Sprintf("logs/%s/%020d.index", topic, offset)
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {

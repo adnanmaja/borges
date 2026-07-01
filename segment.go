@@ -13,8 +13,8 @@ type Segment struct {
 	firstOffset int64 //relative
 }
 
-func newSegment(offset int64) *Segment {
-	filePath := fmt.Sprintf("logs/%020d.log", offset)
+func newSegment(topic string, offset int64) *Segment {
+	filePath := fmt.Sprintf("logs/%s/%020d.log", topic, offset)
 
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

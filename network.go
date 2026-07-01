@@ -84,10 +84,10 @@ func handleClient(conn net.Conn, b *Broker) {
 			log := b.GetOrCreateLog(topic)
 			record, err := log.Read(int64(offset))
 			if err != nil {
-				conn.Write([]byte{0x00}) //error
+				conn.Write([]byte{0x01}) //error
 			}
 
-			conn.Write([]byte{0x00})
+			conn.Write([]byte{0x01})
 
 			timeBuf := make([]byte, 8)
 			binary.BigEndian.PutUint64(timeBuf, uint64(record.Timestamp))

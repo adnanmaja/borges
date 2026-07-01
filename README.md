@@ -1,19 +1,21 @@
-## Borges - temu Kafka
+## Borges - A Lightweight, Single-Node Pub/Sub Engine
+Borges is a minimal, low-level message broker inspired by Apache Kafka, implemented entirely from scratch in Go.
 
-Built this as a freshman to wrap my head around backend fundamentals. The idea was to implement a bare-bones Kafka-like pub/sub from scratch — strictly for learning, definitely not production-ready.
+The project focuses on the core storage and networking primitives of event streaming: building an append-only log, managing segment rotation, implementing custom binary wire protocols, and structuring efficient index files
 
 ## Architecture
 
-Borges is a minimal Kafka-like pub/sub system built from scratch in Go. It consists of:
+Borges is structured as a single-node broker designed for concurrent TCP clients. It avoids high-level database abstractions in favor of direct file-system mechanics:
 
 - **Broker** (`broker.go`) — Manages topic-to-log mappings; creates or retrieves logs on demand.
 - **TCP Server** (`network.go`) — Listens on `:8080`, accepts concurrent clients, and handles produce (0x01) and consume (0x02) commands.
-- **Log** (`log.go`) — The core append-only log. Manages segments, indexes, and provides `Write(payload)` / `Read(offset)`.
+- **Log** (`log.go`) — The core abstraction managing an append-only sequence of records distributed across disk segments.
 - **Segments** (`segment.go`) — Fixed-size log files (default 1 KB for testing, 1 MB intended for real use). When a segment fills up, a new one is created at the next offset.
 - **Index** (`index.go`) — Each segment has a corresponding `.index` file mapping relative offsets to physical byte positions within the `.log` file (16 bytes per entry: 8-byte relative offset + 8-byte absolute offset).
 - **Client** (`client/client.go`) — Example TCP client that sends a produce request then a consume request.
 
 ## Wire Protocol
+Borges utilizes a custom binary protocol over raw TCP for minimal framing overhead.
 
 | Command | Byte | Payload |
 |---------|------|---------|
@@ -24,7 +26,7 @@ Responses: `0x00` = success, `0x01` = error (produce only). Consume replies with
 
 ## Storage Format
 
-Logs are stored per-topic under `logs/<topic>/`:
+Topics are isolated into dedicated directories under `logs/<topic>/`. Storage files utilize zero-padded 64-bit integer naming schemas based on the base offset of the segment:
 
 ```
 logs/
@@ -40,12 +42,13 @@ Each record on disk: `[4 byte payload length][8 byte Unix ms timestamp][payload]
 Index entries are 16 bytes each: `[8 byte relative offset][8 byte absolute byte offset]`.
 
 ## Running
+To spin up the broker:
 
 ```bash
 go run .
 ```
 
-Then in another terminal:
+To run the reference client and perform produce/consume operations, execute this in a separate terminal:
 
 ```bash
 cd client && go run .

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 )
 
@@ -51,22 +50,40 @@ func (l *Log) offsetLookup(indexPath string, offsetTarget int64) (uint64, error)
 	}
 	defer file.Close()
 
+	fileInfo, err := os.Stat(indexPath)
+	if err != nil {
+		return 0, err
+	}
+
+	size := fileInfo.Size()
+	if size == 0 {
+		return 0, fmt.Errorf("index file is empty")
+	}
+
+	entries := size / 16
+
+	var low int64 = 0
+	high := entries - 1
+
 	buf := make([]byte, 16)
 
-	for {
-		_, err := io.ReadFull(file, buf)
-		if err == io.EOF {
-			break
-		}
+	for low <= high {
+		mid := low + (high-low)/2
 
+		_, err = file.ReadAt(buf, mid*16)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("failed to read index at entry %d: %w", mid, err)
 		}
 
-		relOffset := binary.BigEndian.Uint64(buf[0:8])
+		midOffset := binary.BigEndian.Uint64(buf[0:8])
+		midPosition := binary.BigEndian.Uint64(buf[8:16])
 
-		if relOffset == uint64(offsetTarget) {
-			return binary.BigEndian.Uint64((buf[8:16])), nil
+		if midOffset == uint64(offsetTarget) {
+			return midPosition, nil
+		} else if midOffset < uint64(offsetTarget) {
+			low = mid + 1
+		} else {
+			high = mid - 1
 		}
 	}
 

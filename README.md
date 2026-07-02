@@ -46,7 +46,7 @@ Each record on disk: `[4 byte payload length][8 byte Unix ms timestamp][payload]
 
 Index entries are 16 bytes each: `[8 byte relative offset][8 byte absolute byte offset]`.
 
-Old segments are automatically cleaned up: closed segments with `.log` and `.index` files older than 10 minutes are deleted by a background goroutine that runs every 20 seconds.
+Old segments are automatically cleaned up: closed segments with `.log` and `.index` files older than 10 minutes are deleted by a background goroutine that runs every 30 seconds.
 
 ## Running
 To spin up the broker:

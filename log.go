@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,13 +24,23 @@ type Log struct {
 	activeIndex    *Index
 	nextOffset     int64
 	topic          string
+
+	readCache map[string]*os.File
 }
+
+// var writeBufferPool = sync.Pool{
+// 	New: func() any {
+// 		b := make([]byte, 4+8+MaxPayloadSize)
+// 		return &b
+// 	},
+// }
 
 func NewLog(topic string) *Log {
 	var savedOffsets []int64
 
 	l := &Log{
-		topic: topic,
+		topic:     topic,
+		readCache: make(map[string]*os.File),
 	}
 
 	err := spawnInitFile(l.topic)
@@ -170,7 +179,7 @@ func (l *Log) Write(payload []byte) (string, error) {
 }
 
 func (l *Log) Read(relOffset int64) (Record, error) {
-	l.mu.RLock()
+	l.mu.Lock()
 	indexPath := l.findIndexFile(relOffset)
 	absOffset, err := l.offsetLookup(indexPath, relOffset)
 
@@ -181,9 +190,20 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 
 	logPath := strings.TrimSuffix(indexPath, filepath.Ext(indexPath)) + ".log"
 
-	l.mu.RUnlock()
+	file, exists := l.readCache[logPath]
+	if !exists {
+		var err error
+		file, err = os.Open(logPath)
+		if err != nil {
+			l.mu.Unlock()
+			return Record{}, err
+		}
+		l.readCache[logPath] = file
+	}
 
-	file, err := os.Open(logPath)
+	l.mu.Unlock()
+
+	file, err = os.Open(logPath)
 	if err != nil {
 		return Record{}, err
 	}
@@ -194,13 +214,8 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 		fmt.Printf("[DEBUG] Reading log file: %s/%s, with absOffset: %d \n", l.topic, logPath, absOffset)
 	}
 
-	_, err = file.Seek(int64(absOffset), io.SeekStart)
-	if err != nil {
-		return Record{}, err
-	}
-
 	headerBuf := make([]byte, 12)
-	_, err = io.ReadFull(file, headerBuf)
+	_, err = file.ReadAt(headerBuf, int64(absOffset))
 	if err != nil {
 		return Record{}, err
 	}
@@ -214,7 +229,7 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 
 	payloadBuf := make([]byte, payloadLength)
 
-	_, err = io.ReadFull(file, payloadBuf)
+	_, err = file.ReadAt(payloadBuf, int64(absOffset)+12)
 	if err != nil {
 		return Record{}, err
 	}
@@ -226,7 +241,7 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 }
 
 func (l *Log) cleanOldFiles() {
-	ticker := time.NewTicker(20 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -257,6 +272,14 @@ func (l *Log) cleanOldFiles() {
 
 		for _, segment := range expiredSegments {
 			segment.file.Close()
+
+			l.mu.Lock()
+			if cachedFile, exists := l.readCache[segment.path]; exists {
+				cachedFile.Close()
+				delete(l.readCache, segment.path)
+			}
+			l.mu.Unlock()
+
 			os.Remove(segment.path)
 			os.Remove(strings.TrimSuffix(segment.path, ".log") + ".index")
 		}

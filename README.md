@@ -1,7 +1,7 @@
 ## Borges - A Lightweight, Single-Node Pub/Sub Engine
 Borges is a minimal, low-level message broker inspired by Apache Kafka, implemented entirely from scratch in Go.
 
-The project focuses on the core storage and networking primitives of event streaming: building an append-only log, managing segment rotation, implementing custom binary wire protocols, and structuring efficient index files
+The project focuses on the core storage and networking primitives of event streaming: building an append-only log, managing segment rotation, implementing custom binary wire protocols, and structuring efficient index files.
 
 ## Architecture
 
@@ -9,11 +9,13 @@ Borges is structured as a single-node broker designed for concurrent TCP clients
 
 - **Broker** (`broker.go`) — Manages topic-to-log mappings and consumer group offsets; creates or retrieves logs on demand.
 - **TCP Server** (`network.go`) — Listens on `:8080`, accepts concurrent clients, and handles produce (`0x01`), consume (`0x02`), fetch offset (`0x03`), and commit offset (`0x04`) commands.
-- **Log** (`log.go`) — The core abstraction managing an append-only sequence of records distributed across disk segments. A background goroutine runs every 10 seconds, deleting `.log` and `.index` files for segments that have been closed and inactive for 5 minutes (retention-based cleanup).
+- **Log** (`log.go`) — The core abstraction managing an append-only sequence of records distributed across disk segments. A background goroutine runs every 20 seconds, deleting `.log` and `.index` files for segments closed and inactive for 10 minutes (retention-based cleanup).
 - **Segments** (`segment.go`) — Fixed-size log files (default 1 KB for testing, 1 MB intended for real use). When a segment fills up, a new one is created at the next offset.
 - **Index** (`index.go`) — Each segment has a corresponding `.index` file mapping relative offsets to physical byte positions within the `.log` file (16 bytes per entry: 8-byte relative offset + 8-byte absolute offset).
 - **Consumer Group Offsets** (`broker.go`) — In-memory offset tracking per `(groupId, topic)` pair, committed and fetched via the wire protocol. Enables at-least-once consumption semantics.
-- **Client** (`client/client.go`) — Example TCP client demonstrating produce, consume, fetch offset, and commit offset operations.
+- **Clients** — Two clients are provided:
+  - `client/client.go` — Minimal example client demonstrating all four operations.
+  - `client/stress/stress.go` — Concurrent stress tester spawning 20 workers with 50 randomized operations each.
 
 ## Wire Protocol
 Borges utilizes a custom binary protocol over raw TCP for minimal framing overhead.
@@ -69,7 +71,9 @@ cd client && go run .
 ├── index.go         # offset index file
 ├── network.go       # TCP server & client handler
 ├── client/
-│   └── client.go    # test client (produce, consume, fetch/commit offset)
+│   ├── client.go         # example client
+│   └── stress/
+│       └── stress.go     # concurrent stress tester
 ├── logs/            # per-topic segment + index files (created at runtime)
 └── go.mod
 ```

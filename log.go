@@ -63,7 +63,7 @@ func NewLog(topic string) *Log {
 	fmt.Println("[DEBUG] l.nextOffset:", l.nextOffset)
 
 	l.activeSegment = newSegment(l.topic, latestOffset)
-	l.activeIndex = newIndex(l.topic, latestOffset)
+	l.activeIndex = newIndex(l.topic, latestOffset, l.activeSegment.currentSize)
 
 	go l.cleanOldFiles()
 
@@ -77,21 +77,33 @@ func spawnInitFile(topic string) error {
 	logPath := fmt.Sprintf("logs/%s/%020d.log", topic, 0)
 	indexPath := fmt.Sprintf("logs/%s/%020d.index", topic, 0)
 
-	_, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0644)
-	_, err = os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 
-	return err
+	f, err = os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return nil
 }
 
 func (l *Log) prepareSegment(size int64) (*Segment, int64) {
 
 	if (l.activeSegment.currentSize + size) > l.activeSegment.maxSize {
 		l.activeSegment.file.Close()
+		if l.activeIndex != nil {
+			l.activeIndex.file.Close()
+		}
 		l.segments = append(l.segments, l.activeSegment)
 
 		l.segmentOffsets = append(l.segmentOffsets, l.nextOffset)
 		l.activeSegment = newSegment(l.topic, l.segmentOffsets[len(l.segmentOffsets)-1])
-		l.activeIndex = newIndex(l.topic, l.segmentOffsets[len(l.segmentOffsets)-1])
+		l.activeIndex = newIndex(l.topic, l.segmentOffsets[len(l.segmentOffsets)-1], 0)
 	}
 
 	writeOffset := l.activeSegment.currentSize
@@ -130,12 +142,13 @@ func (l *Log) Write(payload []byte) (string, error) {
 	copy(buf[12:], payload)
 
 	segment, _ := l.prepareSegment(int64(len(buf)))
-	l.activeIndex.indexWrite(l.nextOffset, int64(len(buf)))
 
 	_, err := segment.file.Write(buf)
 	if err != nil {
 		return "", err
 	}
+
+	l.activeIndex.indexWrite(l.nextOffset, int64(len(buf)))
 
 	fmt.Printf("[DEBUG] Relative offset: %d, At file: %s, Size: %d B \n", l.nextOffset, l.activeSegment.path, len(buf))
 	fmt.Printf("[DEBUG] Current segment size: %d B, first offset: %d \n", l.activeSegment.currentSize, l.segmentOffsets[0])
@@ -148,21 +161,24 @@ func (l *Log) Write(payload []byte) (string, error) {
 func (l *Log) Read(relOffset int64) (Record, error) {
 	l.mu.RLock()
 	indexPath := l.findIndexFile(relOffset)
-	l.mu.RUnlock()
-
 	absOffset, err := l.offsetLookup(indexPath, relOffset)
 	if err != nil {
+		l.mu.RUnlock()
 		return Record{}, err
 	}
 
 	logPath := strings.TrimSuffix(indexPath, filepath.Ext(indexPath)) + ".log"
 
-	fmt.Printf("[DEBUG] Reading log file: %s/%s, with absOffset: %d \n", l.topic, logPath, absOffset)
-
 	file, err := os.Open(logPath)
 	if err != nil {
+		l.mu.RUnlock()
 		return Record{}, err
 	}
+	l.mu.RUnlock()
+
+	defer file.Close()
+
+	fmt.Printf("[DEBUG] Reading log file: %s/%s, with absOffset: %d \n", l.topic, logPath, absOffset)
 
 	_, err = file.Seek(int64(absOffset), io.SeekStart)
 	if err != nil {
@@ -178,17 +194,21 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 	payloadLength := binary.BigEndian.Uint32(headerBuf[0:4])
 	timestamp := binary.BigEndian.Uint64(headerBuf[4:12])
 
+	if payloadLength > MaxPayloadSize {
+		return Record{}, fmt.Errorf("payload length %d exceeds max %d", payloadLength, MaxPayloadSize)
+	}
+
 	payloadBuf := make([]byte, payloadLength)
 
 	_, err = io.ReadFull(file, payloadBuf)
+	if err != nil {
+		return Record{}, err
+	}
 
-	var r Record
-	r.Timestamp = int64(timestamp)
-	r.Payload = payloadBuf
-
-	defer file.Close()
-
-	return r, nil
+	return Record{
+		Timestamp: int64(timestamp),
+		Payload:   payloadBuf,
+	}, nil
 }
 
 func (l *Log) cleanOldFiles() {
@@ -203,23 +223,16 @@ func (l *Log) cleanOldFiles() {
 
 		var activeSegments []*Segment
 		var activeOffsets []int64
+		var expiredSegments []*Segment
 
-		for _, segment := range l.segments {
-			if currentTime-segment.timestamp >= int64(10*60*1000) { // older than 600,000 milisecond, or 10 minutes
-				fmt.Printf("[DEBUG] Retention expired, deleting: %s\n", segment.path)
-
-				if err := os.Remove(segment.path); err != nil && !os.IsNotExist(err) {
-					fmt.Printf("[ERROR] Failed to delete log file %s: %v\n", segment.path, err)
-				}
-
-				indexPath := strings.TrimSuffix(segment.path, ".log") + ".index"
-				if err := os.Remove(indexPath); err != nil && !os.IsNotExist(err) {
-					fmt.Printf("[ERROR] Failed to delete index file %s: %v\n", indexPath, err)
-				}
-
+		for i, segment := range l.segments {
+			if currentTime-segment.timestamp >= int64(10*60*1000) {
+				expiredSegments = append(expiredSegments, segment)
 			} else {
 				activeSegments = append(activeSegments, segment)
-				activeOffsets = append(activeOffsets, segment.firstOffset)
+				if i < len(l.segmentOffsets) {
+					activeOffsets = append(activeOffsets, l.segmentOffsets[i])
+				}
 			}
 		}
 
@@ -227,5 +240,11 @@ func (l *Log) cleanOldFiles() {
 		l.segmentOffsets = activeOffsets
 
 		l.mu.Unlock()
+
+		for _, segment := range expiredSegments {
+			segment.file.Close()
+			os.Remove(segment.path)
+			os.Remove(strings.TrimSuffix(segment.path, ".log") + ".index")
+		}
 	}
 }

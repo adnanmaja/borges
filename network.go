@@ -7,6 +7,11 @@ import (
 	"net"
 )
 
+const (
+	MaxPayloadSize = 10 * 1024 * 1024 // 10MB
+	MaxStringLen   = 65535            // max uint16 for topic/group names
+)
+
 func StartServer(broker *Broker) {
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -40,54 +45,99 @@ func handleClient(conn net.Conn, b *Broker) {
 			break
 		}
 
+		var connErr error
+
 		switch commandBuf[0] {
 		case 0x01: //produce
-			topic := parseTopic(conn)
+			topic, err := parseTopic(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
 
 			payloadLenBuf := make([]byte, 4)
-			io.ReadFull(conn, payloadLenBuf)
+			if err := readFull(conn, payloadLenBuf); err != nil {
+				connErr = err
+				break
+			}
 			payloadLength := binary.BigEndian.Uint32(payloadLenBuf)
 
-			payload := make([]byte, payloadLength)
-			io.ReadFull(conn, payload)
+			if payloadLength > MaxPayloadSize {
+				connErr = writeAll(conn, []byte{0x01})
+				break
+			}
 
-			fmt.Println("[DEBUG] Topic: ", topic)
+			payload := make([]byte, payloadLength)
+			if err := readFull(conn, payload); err != nil {
+				connErr = err
+				break
+			}
 
 			log := b.GetOrCreateLog(topic)
-			_, err := log.Write(payload)
+			_, err = log.Write(payload)
 
 			if err != nil {
-				conn.Write([]byte{0x00}) //success
+				connErr = writeAll(conn, []byte{0x01})
 			} else {
-				conn.Write([]byte{0x01}) // error
+				connErr = writeAll(conn, []byte{0x00})
 			}
 
 		case 0x02: //consume
-			topic := parseTopic(conn)
-			offset := parseOffset(conn)
+			topic, err := parseTopic(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
+
+			offset, err := parseOffset(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
 
 			log := b.GetOrCreateLog(topic)
 			record, err := log.Read(offset)
 			if err != nil {
-				conn.Write([]byte{0x01}) //error
+				connErr = writeAll(conn, []byte{0x01})
+				break
 			}
 
-			conn.Write([]byte{0x00})
+			connErr = writeAll(conn, []byte{0x00})
+			if connErr != nil {
+				break
+			}
 
 			timeBuf := make([]byte, 8)
 			binary.BigEndian.PutUint64(timeBuf, uint64(record.Timestamp))
-			conn.Write(timeBuf)
+			connErr = writeAll(conn, timeBuf)
+			if connErr != nil {
+				break
+			}
 
 			lenBuf := make([]byte, 4)
 			binary.BigEndian.PutUint32(lenBuf, uint32(len(record.Payload)))
-			conn.Write(lenBuf)
+			connErr = writeAll(conn, lenBuf)
+			if connErr != nil {
+				break
+			}
 
-			conn.Write(record.Payload)
-			fmt.Printf("\nTimestamp: %d, Payload: %s\n", record.Timestamp, record.Payload)
+			connErr = writeAll(conn, record.Payload)
+			if connErr != nil {
+				break
+			}
 
 		case 0x03: // fetch offset
-			groupId := parseGroupId(conn)
-			topic := parseTopic(conn)
+			groupId, err := parseGroupId(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
+
+			topic, err := parseTopic(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
 
 			offset := b.FetchOffset(groupId, topic)
 
@@ -95,51 +145,95 @@ func handleClient(conn net.Conn, b *Broker) {
 			binary.BigEndian.PutUint64(offsetBuf, uint64(offset))
 
 			responseBuf := make([]byte, 9)
-
-			responseBuf[0] = 0x00 //success
+			responseBuf[0] = 0x00
 			copy(responseBuf[1:9], offsetBuf)
 
-			conn.Write(responseBuf)
+			connErr = writeAll(conn, responseBuf)
 
-		case 0x04: // commmit offset
-			groupId := parseGroupId(conn)
-			topic := parseTopic(conn)
-			offset := parseOffset(conn)
+		case 0x04: // commit offset
+			groupId, err := parseGroupId(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
+
+			topic, err := parseTopic(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
+
+			offset, err := parseOffset(conn)
+			if err != nil {
+				connErr = err
+				break
+			}
 
 			b.SaveOffset(groupId, topic, offset)
-			conn.Write([]byte{0x00}) // success
+			connErr = writeAll(conn, []byte{0x00})
+		}
+
+		if connErr != nil {
+			fmt.Println("Connection error:", connErr)
+			break
 		}
 	}
 }
 
 // ----------------------------------------------------- helpers
 
-func parseGroupId(conn net.Conn) string {
+func readFull(conn net.Conn, buf []byte) error {
+	_, err := io.ReadFull(conn, buf)
+	return err
+}
+
+func writeAll(conn net.Conn, buf []byte) error {
+	_, err := conn.Write(buf)
+	return err
+}
+
+func parseGroupId(conn net.Conn) (string, error) {
 	groupIdLenBuf := make([]byte, 2)
-	io.ReadFull(conn, groupIdLenBuf)
+	if err := readFull(conn, groupIdLenBuf); err != nil {
+		return "", err
+	}
 	groupIdLen := binary.BigEndian.Uint16(groupIdLenBuf)
+
+	if groupIdLen > MaxStringLen {
+		return "", nil
+	}
+
 	groupIdBuf := make([]byte, groupIdLen)
-	io.ReadFull(conn, groupIdBuf)
-	groupId := string(groupIdBuf)
+	if err := readFull(conn, groupIdBuf); err != nil {
+		return "", err
+	}
 
-	return groupId
+	return string(groupIdBuf), nil
 }
 
-func parseTopic(conn net.Conn) string {
+func parseTopic(conn net.Conn) (string, error) {
 	topicLenBuf := make([]byte, 2)
-	io.ReadFull(conn, topicLenBuf)
+	if err := readFull(conn, topicLenBuf); err != nil {
+		return "", err
+	}
 	topicLength := binary.BigEndian.Uint16(topicLenBuf)
-	topicBuf := make([]byte, topicLength)
-	io.ReadFull(conn, topicBuf)
-	topic := string(topicBuf)
 
-	return topic
+	if topicLength > MaxStringLen {
+		return "", nil
+	}
+
+	topicBuf := make([]byte, topicLength)
+	if err := readFull(conn, topicBuf); err != nil {
+		return "", err
+	}
+
+	return string(topicBuf), nil
 }
 
-func parseOffset(conn net.Conn) int64 {
+func parseOffset(conn net.Conn) (int64, error) {
 	offsetBuf := make([]byte, 8)
-	io.ReadFull(conn, offsetBuf)
-	offset := binary.BigEndian.Uint64(offsetBuf)
-
-	return int64(offset)
+	if err := readFull(conn, offsetBuf); err != nil {
+		return 0, err
+	}
+	return int64(binary.BigEndian.Uint64(offsetBuf)), nil
 }

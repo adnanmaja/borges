@@ -33,7 +33,7 @@ func newSegment(topic string, offset int64) *Segment {
 		file:        file,
 		path:        filePath,
 		currentSize: int64(stat.Size()),
-		maxSize:     1 * 1024, //1kb for testing, 1mb actual
+		maxSize:     1 * 1024 * 1024, //1mb
 		firstOffset: offset,
 		timestamp:   time.Now().UnixMilli(),
 	}

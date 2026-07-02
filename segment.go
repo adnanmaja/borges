@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,7 @@ type Segment struct {
 	maxSize     int64
 	firstOffset int64 //relative
 	timestamp   int64
+	mu          sync.Mutex
 }
 
 func newSegment(topic string, offset int64) *Segment {

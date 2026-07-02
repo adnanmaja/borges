@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ type Index struct {
 	file           *os.File
 	path           string
 	absoluteOffset int64
+	writer         *bufio.Writer
 }
 
 func newIndex(topic string, offset int64, logSize int64) *Index {
@@ -24,6 +26,7 @@ func newIndex(topic string, offset int64, logSize int64) *Index {
 		file:           file,
 		path:           filePath,
 		absoluteOffset: logSize,
+		writer:         bufio.NewWriterSize(file, 4096), //4kb buffer
 	}
 }
 
@@ -35,10 +38,7 @@ func (idx *Index) indexWrite(relOffset, size int64) {
 
 	idx.absoluteOffset += size
 
-	_, err := idx.file.Write(buf)
-	if err != nil {
-		panic(fmt.Sprintf("indexWrite problem: %s", err))
-	}
+	binary.Write(idx.writer, binary.BigEndian, buf)
 }
 
 func (l *Log) offsetLookup(indexPath string, offsetTarget int64) (uint64, error) {

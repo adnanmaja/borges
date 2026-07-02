@@ -28,12 +28,12 @@ type Log struct {
 	readCache map[string]*os.File
 }
 
-// var writeBufferPool = sync.Pool{
-// 	New: func() any {
-// 		b := make([]byte, 4+8+MaxPayloadSize)
-// 		return &b
-// 	},
-// }
+var writeBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 4+8+MaxPayloadSize)
+		return &b
+	},
+}
 
 func NewLog(topic string) *Log {
 	var savedOffsets []int64
@@ -151,22 +151,29 @@ func (l *Log) findIndexFile(relativeOffset int64) string {
 
 func (l *Log) Write(payload []byte) (string, error) {
 	// [4 bytes for the payload length][8 bytes timestamp][payload]
-	buf := make([]byte, 4+8+len(payload))
-	binary.BigEndian.PutUint32(buf[0:4], uint32(len(payload)))
-	binary.BigEndian.PutUint64(buf[4:12], uint64(time.Now().UnixMilli()))
-	copy(buf[12:], payload)
+	bufPtr := writeBufferPool.Get().(*[]byte)
+	buf := *bufPtr
+
+	totalSize := 4 + 8 + len(payload)
+	writeBuf := buf[:totalSize]
+
+	binary.BigEndian.PutUint32(writeBuf[0:4], uint32(len(payload)))
+	binary.BigEndian.PutUint64(writeBuf[4:12], uint64(time.Now().UnixMilli()))
+	copy(writeBuf[12:], payload)
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	segment, _ := l.prepareSegment(int64(totalSize))
+	l.mu.Unlock()
 
-	segment, _ := l.prepareSegment(int64(len(buf)))
-
-	_, err := segment.file.Write(buf)
+	segment.mu.Lock()
+	_, err := segment.file.Write(writeBuf)
+	segment.mu.Unlock()
 	if err != nil {
+		writeBufferPool.Put(bufPtr)
 		return "", err
 	}
 
-	l.activeIndex.indexWrite(l.nextOffset, int64(len(buf)))
+	l.activeIndex.indexWrite(l.nextOffset, int64(totalSize))
 
 	if debug {
 		fmt.Printf("[DEBUG] Relative offset: %d, At file: %s, Size: %d B \n", l.nextOffset, l.activeSegment.path, len(buf))
@@ -174,6 +181,8 @@ func (l *Log) Write(payload []byte) (string, error) {
 	}
 
 	l.nextOffset++
+
+	writeBufferPool.Put(bufPtr)
 
 	return segment.path, nil
 }

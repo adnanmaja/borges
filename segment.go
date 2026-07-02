@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 )
 
 type Segment struct {
@@ -11,6 +12,7 @@ type Segment struct {
 	currentSize int64
 	maxSize     int64
 	firstOffset int64 //relative
+	timestamp   int64
 }
 
 func newSegment(topic string, offset int64) *Segment {
@@ -33,5 +35,6 @@ func newSegment(topic string, offset int64) *Segment {
 		currentSize: int64(stat.Size()),
 		maxSize:     1 * 1024, //1kb for testing, 1mb actual
 		firstOffset: offset,
+		timestamp:   time.Now().UnixMilli(),
 	}
 }

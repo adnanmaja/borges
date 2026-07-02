@@ -9,7 +9,7 @@ Borges is structured as a single-node broker designed for concurrent TCP clients
 
 - **Broker** (`broker.go`) — Manages topic-to-log mappings and consumer group offsets; creates or retrieves logs on demand.
 - **TCP Server** (`network.go`) — Listens on `:8080`, accepts concurrent clients, and handles produce (`0x01`), consume (`0x02`), fetch offset (`0x03`), and commit offset (`0x04`) commands.
-- **Log** (`log.go`) — The core abstraction managing an append-only sequence of records distributed across disk segments.
+- **Log** (`log.go`) — The core abstraction managing an append-only sequence of records distributed across disk segments. A background goroutine runs every 10 seconds, deleting `.log` and `.index` files for segments that have been closed and inactive for 5 minutes (retention-based cleanup).
 - **Segments** (`segment.go`) — Fixed-size log files (default 1 KB for testing, 1 MB intended for real use). When a segment fills up, a new one is created at the next offset.
 - **Index** (`index.go`) — Each segment has a corresponding `.index` file mapping relative offsets to physical byte positions within the `.log` file (16 bytes per entry: 8-byte relative offset + 8-byte absolute offset).
 - **Consumer Group Offsets** (`broker.go`) — In-memory offset tracking per `(groupId, topic)` pair, committed and fetched via the wire protocol. Enables at-least-once consumption semantics.
@@ -43,6 +43,8 @@ logs/
 Each record on disk: `[4 byte payload length][8 byte Unix ms timestamp][payload]`.
 
 Index entries are 16 bytes each: `[8 byte relative offset][8 byte absolute byte offset]`.
+
+Old segments are automatically cleaned up: closed segments with `.log` and `.index` files older than 10 minutes are deleted by a background goroutine that runs every 20 seconds.
 
 ## Running
 To spin up the broker:

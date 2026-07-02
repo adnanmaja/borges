@@ -64,6 +64,9 @@ func NewLog(topic string) *Log {
 
 	l.activeSegment = newSegment(l.topic, latestOffset)
 	l.activeIndex = newIndex(l.topic, latestOffset)
+
+	go l.cleanOldFiles()
+
 	return l
 }
 
@@ -143,7 +146,9 @@ func (l *Log) Write(payload []byte) (string, error) {
 }
 
 func (l *Log) Read(relOffset int64) (Record, error) {
+	l.mu.RLock()
 	indexPath := l.findIndexFile(relOffset)
+	l.mu.RUnlock()
 
 	absOffset, err := l.offsetLookup(indexPath, relOffset)
 	if err != nil {
@@ -184,4 +189,43 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 	defer file.Close()
 
 	return r, nil
+}
+
+func (l *Log) cleanOldFiles() {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		fmt.Printf("\n[DEBUG] File cleaner woken up\n")
+		currentTime := time.Now().UnixMilli()
+
+		l.mu.Lock()
+
+		var activeSegments []*Segment
+		var activeOffsets []int64
+
+		for _, segment := range l.segments {
+			if currentTime-segment.timestamp >= int64(10*60*1000) { // older than 600,000 milisecond, or 10 minutes
+				fmt.Printf("[DEBUG] Retention expired, deleting: %s\n", segment.path)
+
+				if err := os.Remove(segment.path); err != nil && !os.IsNotExist(err) {
+					fmt.Printf("[ERROR] Failed to delete log file %s: %v\n", segment.path, err)
+				}
+
+				indexPath := strings.TrimSuffix(segment.path, ".log") + ".index"
+				if err := os.Remove(indexPath); err != nil && !os.IsNotExist(err) {
+					fmt.Printf("[ERROR] Failed to delete index file %s: %v\n", indexPath, err)
+				}
+
+			} else {
+				activeSegments = append(activeSegments, segment)
+				activeOffsets = append(activeOffsets, segment.firstOffset)
+			}
+		}
+
+		l.segments = activeSegments
+		l.segmentOffsets = activeOffsets
+
+		l.mu.Unlock()
+	}
 }

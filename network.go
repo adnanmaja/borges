@@ -17,7 +17,7 @@ func StartServer(broker *Broker) {
 	if err != nil {
 		panic(fmt.Sprintf("error starting server: %s", err))
 	}
-	fmt.Println("[DEBUG] Listeing at :8080")
+	fmt.Println("Listeing at :8080")
 	defer listener.Close()
 
 	for {
@@ -122,9 +122,6 @@ func handleClient(conn net.Conn, b *Broker) {
 			}
 
 			connErr = writeAll(conn, record.Payload)
-			if connErr != nil {
-				break
-			}
 
 		case 0x03: // fetch offset
 			groupId, err := parseGroupId(conn)

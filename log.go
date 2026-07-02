@@ -58,9 +58,14 @@ func NewLog(topic string) *Log {
 		panic(fmt.Sprintf("Error at newLog(): %s", err))
 	}
 
-	fmt.Println("[DEBUG] Latest file size:", latestFile.Size())
+	if debug {
+		fmt.Println("[DEBUG] Latest file size:", latestFile.Size())
+	}
 	l.nextOffset = latestOffset + latestFile.Size()/16 // latest offset + entries inside the latest offset's .index file
-	fmt.Println("[DEBUG] l.nextOffset:", l.nextOffset)
+
+	if debug {
+		fmt.Println("[DEBUG] l.nextOffset:", l.nextOffset)
+	}
 
 	l.activeSegment = newSegment(l.topic, latestOffset)
 	l.activeIndex = newIndex(l.topic, latestOffset, l.activeSegment.currentSize)
@@ -72,7 +77,9 @@ func NewLog(topic string) *Log {
 
 func spawnInitFile(topic string) error {
 	os.MkdirAll(fmt.Sprintf("logs/%s", topic), 0755)
-	fmt.Printf("[DEBUG] Created directory: logs/%s\n", topic)
+	if debug {
+		fmt.Printf("[DEBUG] Created directory: logs/%s\n", topic)
+	}
 
 	logPath := fmt.Sprintf("logs/%s/%020d.log", topic, 0)
 	indexPath := fmt.Sprintf("logs/%s/%020d.index", topic, 0)
@@ -109,7 +116,9 @@ func (l *Log) prepareSegment(size int64) (*Segment, int64) {
 	writeOffset := l.activeSegment.currentSize
 	l.activeSegment.currentSize += size
 
-	fmt.Println("[DEBUG] l.nextOffset: ", l.nextOffset)
+	if debug {
+		fmt.Println("[DEBUG] l.nextOffset: ", l.nextOffset)
+	}
 	return l.activeSegment, writeOffset
 }
 
@@ -132,14 +141,14 @@ func (l *Log) findIndexFile(relativeOffset int64) string {
 }
 
 func (l *Log) Write(payload []byte) (string, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	// [4 bytes for the payload length][8 bytes timestamp][payload]
 	buf := make([]byte, 4+8+len(payload))
 	binary.BigEndian.PutUint32(buf[0:4], uint32(len(payload)))
 	binary.BigEndian.PutUint64(buf[4:12], uint64(time.Now().UnixMilli()))
 	copy(buf[12:], payload)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	segment, _ := l.prepareSegment(int64(len(buf)))
 
@@ -150,8 +159,10 @@ func (l *Log) Write(payload []byte) (string, error) {
 
 	l.activeIndex.indexWrite(l.nextOffset, int64(len(buf)))
 
-	fmt.Printf("[DEBUG] Relative offset: %d, At file: %s, Size: %d B \n", l.nextOffset, l.activeSegment.path, len(buf))
-	fmt.Printf("[DEBUG] Current segment size: %d B, first offset: %d \n", l.activeSegment.currentSize, l.segmentOffsets[0])
+	if debug {
+		fmt.Printf("[DEBUG] Relative offset: %d, At file: %s, Size: %d B \n", l.nextOffset, l.activeSegment.path, len(buf))
+		fmt.Printf("[DEBUG] Current segment size: %d B, first offset: %d \n", l.activeSegment.currentSize, l.segmentOffsets[0])
+	}
 
 	l.nextOffset++
 
@@ -162,6 +173,7 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 	l.mu.RLock()
 	indexPath := l.findIndexFile(relOffset)
 	absOffset, err := l.offsetLookup(indexPath, relOffset)
+
 	if err != nil {
 		l.mu.RUnlock()
 		return Record{}, err
@@ -169,16 +181,18 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 
 	logPath := strings.TrimSuffix(indexPath, filepath.Ext(indexPath)) + ".log"
 
+	l.mu.RUnlock()
+
 	file, err := os.Open(logPath)
 	if err != nil {
-		l.mu.RUnlock()
 		return Record{}, err
 	}
-	l.mu.RUnlock()
 
 	defer file.Close()
 
-	fmt.Printf("[DEBUG] Reading log file: %s/%s, with absOffset: %d \n", l.topic, logPath, absOffset)
+	if debug {
+		fmt.Printf("[DEBUG] Reading log file: %s/%s, with absOffset: %d \n", l.topic, logPath, absOffset)
+	}
 
 	_, err = file.Seek(int64(absOffset), io.SeekStart)
 	if err != nil {

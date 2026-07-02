@@ -9,3 +9,4 @@ stress/
 stress2/
 client/stress
 client/stress2
+client/kafka

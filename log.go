@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"sort"
@@ -159,16 +160,19 @@ func (l *Log) findIndexFile(relativeOffset int64) string {
 }
 
 func (l *Log) Write(payload []byte) (string, error) {
-	// [4 bytes for the payload length][8 bytes timestamp][payload]
+	// [4 bytes checksum][4 bytes for the payload length][8 bytes timestamp][payload]
 	bufPtr := writeBufferPool.Get().(*[]byte)
 	buf := *bufPtr
 
-	totalSize := 4 + 8 + len(payload)
+	totalSize := 4 + 4 + 8 + len(payload)
 	writeBuf := buf[:totalSize]
 
-	binary.BigEndian.PutUint32(writeBuf[0:4], uint32(len(payload)))
-	binary.BigEndian.PutUint64(writeBuf[4:12], uint64(time.Now().UnixMilli()))
-	copy(writeBuf[12:], payload)
+	checksum := crc32.ChecksumIEEE(payload)
+
+	binary.BigEndian.PutUint32(writeBuf[0:4], checksum)
+	binary.BigEndian.PutUint32(writeBuf[4:8], uint32(len(payload)))
+	binary.BigEndian.PutUint64(writeBuf[8:16], uint64(time.Now().UnixMilli()))
+	copy(writeBuf[16:], payload)
 
 	l.mu.Lock()
 	segment, _ := l.prepareSegment(int64(totalSize))
@@ -237,14 +241,15 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 		fmt.Printf("[DEBUG] Reading log file: %s/%s, with absOffset: %d \n", l.topic, logPath, absOffset)
 	}
 
-	headerBuf := make([]byte, 12)
+	headerBuf := make([]byte, 16)
 	_, err = logFile.ReadAt(headerBuf, int64(absOffset))
 	if err != nil {
 		return Record{}, err
 	}
 
-	payloadLength := binary.BigEndian.Uint32(headerBuf[0:4])
-	timestamp := binary.BigEndian.Uint64(headerBuf[4:12])
+	savedChecksum := binary.BigEndian.Uint32(headerBuf[0:4])
+	payloadLength := binary.BigEndian.Uint32(headerBuf[4:8])
+	timestamp := binary.BigEndian.Uint64(headerBuf[8:16])
 
 	if payloadLength > MaxPayloadSize {
 		return Record{}, fmt.Errorf("payload length %d exceeds max %d", payloadLength, MaxPayloadSize)
@@ -252,9 +257,14 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 
 	payloadBuf := make([]byte, payloadLength)
 
-	_, err = logFile.ReadAt(payloadBuf, int64(absOffset)+12)
+	_, err = logFile.ReadAt(payloadBuf, int64(absOffset)+16)
 	if err != nil {
 		return Record{}, err
+	}
+
+	actualChecksum := crc32.ChecksumIEEE(payloadBuf)
+	if savedChecksum != actualChecksum {
+		return Record{}, fmt.Errorf("Data corrupt, checksum mismatch")
 	}
 
 	return Record{

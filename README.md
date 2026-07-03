@@ -43,7 +43,7 @@ logs/
     └── 00000000000000000032.index
 ```
 
-Each record on disk: `[4 byte payload length][8 byte Unix ms timestamp][payload]`.
+Each record on disk: `[4 byte CRC32][4 byte payload length][8 byte Unix ms timestamp][payload]`.
 
 Index entries are 16 bytes each: `[8 byte relative offset][8 byte absolute byte offset]`.
 

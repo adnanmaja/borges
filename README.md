@@ -7,12 +7,12 @@ The project focuses on the core storage and networking primitives of event strea
 
 Borges is structured as a single-node broker designed for concurrent TCP clients. It avoids high-level database abstractions in favor of direct file-system mechanics:
 
-- **Broker** (`broker.go`) — Manages topic-to-log mappings and consumer group offsets; creates or retrieves logs on demand.
-- **TCP Server** (`network.go`) — Listens on `:8080`, accepts concurrent clients, and handles produce (`0x01`), consume (`0x02`), fetch offset (`0x03`), and commit offset (`0x04`) commands.
+- **Broker** (`broker.go`) — Manages topic-to-log mappings and consumer group offsets; creates or retrieves logs on demand. Persists consumer offsets to disk via periodic snapshots (every 20 seconds) and loads them on startup for crash recovery.
+- **TCP Server** (`network.go`) — Listens on `:8080`, accepts concurrent clients, and handles produce (`0x01`), consume (`0x02`), fetch offset (`0x03`), and commit offset (`0x04`) commands. Supports graceful shutdown on SIGINT/SIGTERM: drains all active connections before exiting.
 - **Log** (`log.go`) — The core abstraction managing an append-only sequence of records distributed across disk segments. A background goroutine runs every 30 seconds, deleting `.log` and `.index` files for segments closed and inactive for 10 minutes (retention-based cleanup).
 - **Segments** (`segment.go`) — Fixed-size log files (default 1 KB for testing, 1 MB intended for real use). When a segment fills up, a new one is created at the next offset. Each segment carries its own mutex for fine-grained locking during concurrent writes.
 - **Index** (`index.go`) — Each segment has a corresponding `.index` file mapping relative offsets to physical byte positions within the `.log` file (16 bytes per entry: 8-byte relative offset + 8-byte absolute offset). Index lookups use binary search (O(log n)) with buffered writes batched through a 4 KB write buffer.
-- **Consumer Group Offsets** (`broker.go`) — In-memory offset tracking per `(groupId, topic)` pair, committed and fetched via the wire protocol. Enables at-least-once consumption semantics.
+- **Consumer Group Offsets** (`broker.go`) — In-memory offset tracking per `(groupId, topic)` pair, committed and fetched via the wire protocol. A background goroutine snapshots offsets to `logs/offset_snapshot.json` every 20 seconds (with atomic write via temp file + rename), loaded on broker startup for at-least-once durability across restarts.
 - **Clients** — Two clients are provided:
   - `client/client.go` — Minimal example client demonstrating all four operations.
   - `client/stress/stress.go` — Concurrent stress tester spawning 20 workers with 50 randomized operations each.
@@ -35,6 +35,7 @@ Topics are isolated into dedicated directories under `logs/<topic>/`. Storage fi
 
 ```
 logs/
+├── offset_snapshot.json           # consumer group offset snapshot
 └── <topic>/
     ├── 00000000000000000000.log   # segment file (raw records)
     ├── 00000000000000000000.index # index file (offset → byte position)

@@ -2,13 +2,18 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 )
 
 const (
-	MaxPayloadSize = 64 * 1024 // 64KB
+	MaxPayloadSize = 64 * 1024 // 64kb
 	MaxStringLen   = 65535     // max uint16 for topic/group names
 )
 
@@ -18,16 +23,59 @@ func StartServer(broker *Broker) {
 		panic(fmt.Sprintf("error starting server: %s", err))
 	}
 	fmt.Println("Listeing at :8080")
-	defer listener.Close()
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	activeConn := make(map[net.Conn]struct{})
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+
+		listener.Close()
+
+		mu.Lock()
+		fmt.Printf("shutting down %d conncection ...", len(activeConn))
+		for conn := range activeConn {
+			conn.Close()
+		}
+		mu.Unlock()
+	}()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				fmt.Println("listener closed.")
+				break
+			}
+
 			fmt.Println("error accepting connection: ", err)
 			continue
 		}
-		go handleClient(conn, broker)
+
+		mu.Lock()
+		activeConn[conn] = struct{}{}
+		mu.Unlock()
+
+		wg.Add(1)
+
+		go func(c net.Conn) {
+			defer wg.Done()
+			defer func() {
+				mu.Lock()
+				delete(activeConn, c)
+				mu.Unlock()
+			}()
+
+			handleClient(c, broker)
+		}(conn)
 	}
+
+	wg.Wait()
+	fmt.Println("dead")
 }
 
 func handleClient(conn net.Conn, b *Broker) {

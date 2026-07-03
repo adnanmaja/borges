@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"sync"
+	"time"
 )
 
 type Broker struct {
@@ -11,10 +15,13 @@ type Broker struct {
 }
 
 func NewBroker() *Broker {
-	return &Broker{
+	b := &Broker{
 		logs:    make(map[string]*Log),
 		offsets: make(map[string]map[string]int64),
 	}
+	b.loadSnapshot()
+	b.periodicSnapshot()
+	return b
 }
 
 func (b *Broker) GetOrCreateLog(topic string) *Log {
@@ -51,4 +58,73 @@ func (b *Broker) FetchOffset(groupId, topic string) int64 {
 	}
 
 	return 0 //default
+}
+
+func (b *Broker) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	var errs []error
+	for topic, log := range b.logs {
+		if err := log.activeIndex.writer.Flush(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to flush topic %s: %w", topic, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("encountered errors during shutdown flush: %v", errs)
+	}
+
+	b.saveSnapshot()
+	return nil
+}
+
+func (b *Broker) saveSnapshot() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := json.Marshal(b.offsets)
+	if err != nil {
+		return err
+	}
+
+	snapshotPath := "logs/offset_snapshot.json"
+	tmpPath := snapshotPath + ".tmp"
+
+	err = os.WriteFile(tmpPath, data, 0644)
+	if err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, snapshotPath)
+}
+
+func (b *Broker) loadSnapshot() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	snapshotPath := "logs/offset_snapshot.json"
+
+	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
+		b.offsets = make(map[string]map[string]int64)
+		return nil
+	}
+
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(data, &b.offsets)
+}
+
+func (b *Broker) periodicSnapshot() {
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			b.saveSnapshot()
+		}
+	}()
 }

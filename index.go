@@ -30,7 +30,7 @@ func newIndex(topic string, offset int64, logSize int64) *Index {
 	}
 }
 
-func (idx *Index) indexWrite(relOffset, size int64) {
+func (idx *Index) IndexWrite(relOffset, size int64) {
 	// 8 byte relative offset & 8 byte absolute offset (physical byte offset)
 	buf := make([]byte, 8+8)
 	binary.BigEndian.PutUint64(buf[0:8], uint64(relOffset))

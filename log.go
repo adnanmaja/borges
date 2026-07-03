@@ -180,7 +180,7 @@ func (l *Log) Write(payload []byte) (string, error) {
 		return "", err
 	}
 
-	l.activeIndex.indexWrite(l.nextOffset, int64(totalSize))
+	l.activeIndex.IndexWrite(l.nextOffset, int64(totalSize))
 
 	if debug {
 		fmt.Printf("[DEBUG] Relative offset: %d, At file: %s, Size: %d B \n", l.nextOffset, l.activeSegment.path, len(buf))

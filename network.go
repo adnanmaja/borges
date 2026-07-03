@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -37,9 +38,9 @@ func StartServer(broker *Broker) {
 		listener.Close()
 
 		mu.Lock()
-		fmt.Printf("shutting down %d conncection ...", len(activeConn))
+		fmt.Printf("shutting down %d conncection ...\n", len(activeConn))
 		for conn := range activeConn {
-			conn.Close()
+			conn.SetReadDeadline(time.Now())
 		}
 		mu.Unlock()
 	}()
@@ -75,6 +76,7 @@ func StartServer(broker *Broker) {
 	}
 
 	wg.Wait()
+	broker.Close()
 	fmt.Println("dead")
 }
 

@@ -12,12 +12,14 @@ type Broker struct {
 	mu      sync.RWMutex
 	logs    map[string]*Log
 	offsets map[string]map[string]int64 // map[GroupID]map[TopicName]Offset
+	stopCh  chan struct{}
 }
 
 func NewBroker() *Broker {
 	b := &Broker{
 		logs:    make(map[string]*Log),
 		offsets: make(map[string]map[string]int64),
+		stopCh:  make(chan struct{}),
 	}
 	b.loadSnapshot()
 	b.periodicSnapshot()
@@ -30,7 +32,7 @@ func (b *Broker) GetOrCreateLog(topic string) *Log {
 
 	log, exists := b.logs[topic]
 	if !exists {
-		log = NewLog(topic)
+		log = NewLog(topic, b.stopCh)
 		b.logs[topic] = log
 	}
 	return log
@@ -61,21 +63,28 @@ func (b *Broker) FetchOffset(groupId, topic string) int64 {
 }
 
 func (b *Broker) Close() error {
+	close(b.stopCh)
+
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	var errs []error
-	for topic, log := range b.logs {
+	for _, log := range b.logs {
 		if err := log.activeIndex.writer.Flush(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to flush topic %s: %w", topic, err))
+			errs = append(errs, fmt.Errorf("failed to flush index: %w", err))
+		}
+
+		for path, f := range log.readCache {
+			f.Close()
+			delete(log.readCache, path)
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("encountered errors during shutdown flush: %v", errs)
-	}
-
+	b.mu.Unlock()
 	b.saveSnapshot()
+
+	if len(errs) > 0 {
+		return fmt.Errorf("encountered errors during shutdown: %v", errs)
+	}
 	return nil
 }
 
@@ -123,8 +132,13 @@ func (b *Broker) periodicSnapshot() {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			b.saveSnapshot()
+		for {
+			select {
+			case <-ticker.C:
+				b.saveSnapshot()
+			case <-b.stopCh:
+				return
+			}
 		}
 	}()
 }

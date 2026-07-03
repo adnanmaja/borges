@@ -24,6 +24,7 @@ type Log struct {
 	activeIndex    *Index
 	nextOffset     int64
 	topic          string
+	stopCh         chan struct{}
 
 	readCache map[string]*os.File
 }
@@ -35,12 +36,13 @@ var writeBufferPool = sync.Pool{
 	},
 }
 
-func NewLog(topic string) *Log {
+func NewLog(topic string, stopCh chan struct{}) *Log {
 	var savedOffsets []int64
 
 	l := &Log{
 		topic:     topic,
 		readCache: make(map[string]*os.File),
+		stopCh:    stopCh,
 	}
 
 	err := spawnInitFile(l.topic)
@@ -198,7 +200,7 @@ func (l *Log) Write(payload []byte) (string, error) {
 func (l *Log) Read(relOffset int64) (Record, error) {
 	l.mu.Lock()
 	indexPath := l.findIndexFile(relOffset)
-	absOffset, err := l.offsetLookup(indexPath, relOffset)
+	absOffset, err := l.activeIndex.offsetLookup(indexPath, relOffset)
 
 	if err != nil {
 		l.mu.Unlock()
@@ -254,41 +256,46 @@ func (l *Log) cleanOldFiles() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		fmt.Printf("\n[DEBUG] File cleaner woken up\n")
-		currentTime := time.Now().UnixMilli()
-
-		l.mu.Lock()
-
-		var activeSegments []*Segment
-		var activeOffsets []int64
-		var expiredSegments []*Segment
-
-		for i, segment := range l.segments {
-			if currentTime-segment.timestamp >= int64(10*60*1000) {
-				expiredSegments = append(expiredSegments, segment)
-			} else {
-				activeSegments = append(activeSegments, segment)
-				if i < len(l.segmentOffsets) {
-					activeOffsets = append(activeOffsets, l.segmentOffsets[i])
-				}
-			}
-		}
-
-		l.segments = activeSegments
-		l.segmentOffsets = activeOffsets
-
-		l.mu.Unlock()
-
-		for _, segment := range expiredSegments {
-			segment.file.Close()
+	for {
+		select {
+		case <-ticker.C:
+			currentTime := time.Now().UnixMilli()
 
 			l.mu.Lock()
-			delete(l.readCache, segment.path)
+
+			var activeSegments []*Segment
+			var activeOffsets []int64
+			var expiredSegments []*Segment
+
+			for i, segment := range l.segments {
+				if currentTime-segment.timestamp >= int64(10*60*1000) {
+					expiredSegments = append(expiredSegments, segment)
+				} else {
+					activeSegments = append(activeSegments, segment)
+					if i < len(l.segmentOffsets) {
+						activeOffsets = append(activeOffsets, l.segmentOffsets[i])
+					}
+				}
+			}
+
+			l.segments = activeSegments
+			l.segmentOffsets = activeOffsets
+
 			l.mu.Unlock()
 
-			os.Remove(segment.path)
-			os.Remove(strings.TrimSuffix(segment.path, ".log") + ".index")
+			for _, segment := range expiredSegments {
+				segment.file.Close()
+
+				l.mu.Lock()
+				delete(l.readCache, segment.path)
+				l.mu.Unlock()
+
+				os.Remove(segment.path)
+				os.Remove(strings.TrimSuffix(segment.path, ".log") + ".index")
+			}
+
+		case <-l.stopCh:
+			return
 		}
 	}
 }

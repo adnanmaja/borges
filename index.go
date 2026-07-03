@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
 )
 
 type Index struct {
@@ -12,6 +13,8 @@ type Index struct {
 	path           string
 	absoluteOffset int64
 	writer         *bufio.Writer
+	mu             sync.RWMutex
+	cache          map[int64]int64 // [relative]absolute
 }
 
 func newIndex(topic string, offset int64, logSize int64) *Index {
@@ -27,6 +30,7 @@ func newIndex(topic string, offset int64, logSize int64) *Index {
 		path:           filePath,
 		absoluteOffset: logSize,
 		writer:         bufio.NewWriterSize(file, 4096), //4kb buffer
+		cache:          make(map[int64]int64),
 	}
 }
 
@@ -36,13 +40,26 @@ func (idx *Index) IndexWrite(relOffset, size int64) {
 	binary.BigEndian.PutUint64(buf[0:8], uint64(relOffset))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(idx.absoluteOffset))
 
+	idx.mu.Lock()
+	idx.cache[relOffset] = idx.absoluteOffset
 	idx.absoluteOffset += size
+	_, err := idx.writer.Write(buf)
+	idx.mu.Unlock()
+	if err != nil {
+		// whatever, not gonna error anyway trust
+	}
 
-	binary.Write(idx.writer, binary.BigEndian, buf)
-	idx.writer.Flush()
 }
 
-func (l *Log) offsetLookup(indexPath string, offsetTarget int64) (uint64, error) {
+func (idx *Index) offsetLookup(indexPath string, offsetTarget int64) (uint64, error) {
+
+	idx.mu.RLock()
+	absOffset, found := idx.cache[offsetTarget]
+	idx.mu.RUnlock()
+	if found {
+		return uint64(absOffset), nil
+	}
+
 	if debug {
 		fmt.Println("[DEBUG] Opening index file: ", indexPath)
 	}

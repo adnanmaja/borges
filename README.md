@@ -22,7 +22,7 @@ Borges utilizes a custom binary protocol over raw TCP for minimal framing overhe
 
 | Command | Byte | Payload |
 |---------|------|---------|
-| Produce | `0x01` | `[2 byte topic length][topic][4 byte payload length][N bytes payload]` |
+| Produce | `0x01` | `[2 byte topic length][topic][4 byte message count] + loop([4 byte payload length][N bytes payload])` |
 | Consume | `0x02` | `[2 byte topic length][topic][8 byte offset]` |
 | Fetch Offset | `0x03` | `[2 byte group id length][group id][2 byte topic length][topic]` |
 | Commit Offset | `0x04` | `[2 byte group id length][group id][2 byte topic length][topic][8 byte offset]` |
@@ -62,6 +62,7 @@ A series of throughput and latency optimizations have been applied beyond the in
 - **`ReadAt` for random access** — Reads use `file.ReadAt` with an explicit offset rather than `Seek` + `Read`, avoiding file position state and enabling safe concurrent reads on the same file descriptor.
 - **Debug print gating** — All `[DEBUG]` print statements are guarded by a `const debug` compile-time toggle (set to `false` in production), eliminating `fmt.Println` overhead from the hot path.
 - **Cleanup interval tuning** — The background retention sweep was reduced from every 20 seconds to every 30 seconds, lowering periodic I/O pressure.
+- **Message batching** — The `Produce` command supports batching multiple messages into a single network payload. Clients provide a message count followed by a sequence of length-prefixed payloads, drastically reducing network round-trips, system call overhead, and per-message framing costs on the hot path.
 
 ## Running
 To spin up the broker:

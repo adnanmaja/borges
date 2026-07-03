@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	MaxPayloadSize = 64 * 1024 // 64kb
-	MaxStringLen   = 65535     // max uint16 for topic/group names
+	MaxPayloadSize   = 64 * 1024 // 64kb
+	MaxStringLen     = 65535     // max uint16 for topic/group names
+	MaxBatchMsgCount = 50        //50 messages per batch
 )
 
 func StartServer(broker *Broker) {
@@ -105,26 +106,47 @@ func handleClient(conn net.Conn, b *Broker) {
 				break
 			}
 
-			payloadLenBuf := make([]byte, 4)
-			if err := readFull(conn, payloadLenBuf); err != nil {
+			msgCountBuf := make([]byte, 4)
+			err = readFull(conn, msgCountBuf)
+			if err != nil {
 				connErr = err
 				break
 			}
-			payloadLength := binary.BigEndian.Uint32(payloadLenBuf)
+			messageCount := binary.BigEndian.Uint32(msgCountBuf)
 
-			if payloadLength > MaxPayloadSize {
-				connErr = writeAll(conn, []byte{0x01})
-				break
-			}
-
-			payload := make([]byte, payloadLength)
-			if err := readFull(conn, payload); err != nil {
-				connErr = err
+			if messageCount > MaxBatchMsgCount {
+				_ = writeAll(conn, []byte{0x01})
+				connErr = errors.New("batch message count exceeds limit")
 				break
 			}
 
 			log := b.GetOrCreateLog(topic)
-			_, err = log.Write(payload)
+
+			payloadLenBuf := make([]byte, 4)
+			for range messageCount {
+
+				if err = readFull(conn, payloadLenBuf); err != nil {
+					connErr = err
+					break
+				}
+				payloadLength := binary.BigEndian.Uint32(payloadLenBuf)
+
+				if payloadLength > MaxPayloadSize {
+					err = errors.New("payload too large")
+					break
+				}
+
+				payload := make([]byte, payloadLength)
+				if err = readFull(conn, payload); err != nil {
+					connErr = err
+					break
+				}
+
+				_, err = log.Write(payload)
+				if err != nil {
+					break
+				}
+			}
 
 			if err != nil {
 				connErr = writeAll(conn, []byte{0x01})

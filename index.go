@@ -39,6 +39,7 @@ func (idx *Index) indexWrite(relOffset, size int64) {
 	idx.absoluteOffset += size
 
 	binary.Write(idx.writer, binary.BigEndian, buf)
+	idx.writer.Flush()
 }
 
 func (l *Log) offsetLookup(indexPath string, offsetTarget int64) (uint64, error) {
@@ -46,9 +47,13 @@ func (l *Log) offsetLookup(indexPath string, offsetTarget int64) (uint64, error)
 		fmt.Println("[DEBUG] Opening index file: ", indexPath)
 	}
 
-	file := l.activeIndex.file
+	file, err := os.Open(indexPath)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
 
-	fileInfo, err := os.Stat(indexPath)
+	fileInfo, err := file.Stat()
 	if err != nil {
 		return 0, err
 	}

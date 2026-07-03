@@ -113,6 +113,7 @@ func (l *Log) prepareSegment(size int64) (*Segment, int64) {
 	if (l.activeSegment.currentSize + size) > l.activeSegment.maxSize {
 		l.activeSegment.file.Close()
 		if l.activeIndex != nil {
+			l.activeIndex.writer.Flush()
 			l.activeIndex.file.Close()
 		}
 		l.segments = append(l.segments, l.activeSegment)
@@ -136,17 +137,23 @@ func (l *Log) findIndexFile(relativeOffset int64) string {
 		return ""
 	}
 
-	latestSegmentOffset := l.segmentOffsets[len(l.segmentOffsets)-1]
-	if relativeOffset >= latestSegmentOffset {
-		return fmt.Sprintf("logs/%s/%020d.index", l.topic, latestSegmentOffset)
-	}
-
-	for i := 0; i < len(l.segmentOffsets)-1; i++ {
-		if relativeOffset >= l.segmentOffsets[i] && relativeOffset < l.segmentOffsets[i+1] {
-			return fmt.Sprintf("logs/%s/%020d.index", l.topic, l.segmentOffsets[i])
+	// Binary search for the segment whose base offset <= relativeOffset.
+	// segmentOffsets is sorted ascending (segments appended in order).
+	lo, hi := 0, len(l.segmentOffsets)-1
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if l.segmentOffsets[mid] <= relativeOffset {
+			lo = mid
+		} else {
+			hi = mid - 1
 		}
 	}
-	return ""
+
+	if l.segmentOffsets[lo] > relativeOffset {
+		return ""
+	}
+
+	return fmt.Sprintf("logs/%s/%020d.index", l.topic, l.segmentOffsets[lo])
 }
 
 func (l *Log) Write(payload []byte) (string, error) {
@@ -163,12 +170,12 @@ func (l *Log) Write(payload []byte) (string, error) {
 
 	l.mu.Lock()
 	segment, _ := l.prepareSegment(int64(totalSize))
-	l.mu.Unlock()
 
 	segment.mu.Lock()
 	_, err := segment.file.Write(writeBuf)
 	segment.mu.Unlock()
 	if err != nil {
+		l.mu.Unlock()
 		writeBufferPool.Put(bufPtr)
 		return "", err
 	}
@@ -181,6 +188,7 @@ func (l *Log) Write(payload []byte) (string, error) {
 	}
 
 	l.nextOffset++
+	l.mu.Unlock()
 
 	writeBufferPool.Put(bufPtr)
 
@@ -193,7 +201,7 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 	absOffset, err := l.offsetLookup(indexPath, relOffset)
 
 	if err != nil {
-		l.mu.RUnlock()
+		l.mu.Unlock()
 		return Record{}, err
 	}
 
@@ -211,13 +219,6 @@ func (l *Log) Read(relOffset int64) (Record, error) {
 	}
 
 	l.mu.Unlock()
-
-	file, err = os.Open(logPath)
-	if err != nil {
-		return Record{}, err
-	}
-
-	defer file.Close()
 
 	if debug {
 		fmt.Printf("[DEBUG] Reading log file: %s/%s, with absOffset: %d \n", l.topic, logPath, absOffset)
@@ -283,10 +284,7 @@ func (l *Log) cleanOldFiles() {
 			segment.file.Close()
 
 			l.mu.Lock()
-			if cachedFile, exists := l.readCache[segment.path]; exists {
-				cachedFile.Close()
-				delete(l.readCache, segment.path)
-			}
+			delete(l.readCache, segment.path)
 			l.mu.Unlock()
 
 			os.Remove(segment.path)

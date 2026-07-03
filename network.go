@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	MaxPayloadSize = 10 * 1024 * 1024 // 10MB
-	MaxStringLen   = 65535            // max uint16 for topic/group names
+	MaxPayloadSize = 64 * 1024 // 64KB
+	MaxStringLen   = 65535     // max uint16 for topic/group names
 )
 
 func StartServer(broker *Broker) {

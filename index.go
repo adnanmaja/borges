@@ -14,7 +14,7 @@ type Index struct {
 	absoluteOffset int64
 	writer         *bufio.Writer
 	mu             sync.RWMutex
-	cache          map[int64]int64 // [relative]absolute
+	cache          map[int64]int64 // map[relative]absolute
 }
 
 func newIndex(topic string, offset int64, logSize int64) *Index {
@@ -51,26 +51,20 @@ func (idx *Index) IndexWrite(relOffset, size int64) {
 
 }
 
-func (idx *Index) offsetLookup(indexPath string, offsetTarget int64) (uint64, error) {
-
+func (idx *Index) offsetLookup(indexFile *os.File, offsetTarget int64) (uint64, error) {
 	idx.mu.RLock()
 	absOffset, found := idx.cache[offsetTarget]
 	idx.mu.RUnlock()
+
 	if found {
 		return uint64(absOffset), nil
 	}
 
 	if debug {
-		fmt.Println("[DEBUG] Opening index file: ", indexPath)
+		fmt.Println("[DEBUG] Opening index file: ", indexFile)
 	}
 
-	file, err := os.Open(indexPath)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	fileInfo, err := file.Stat()
+	fileInfo, err := indexFile.Stat()
 	if err != nil {
 		return 0, err
 	}
@@ -90,7 +84,7 @@ func (idx *Index) offsetLookup(indexPath string, offsetTarget int64) (uint64, er
 	for low <= high {
 		mid := low + (high-low)/2
 
-		_, err = file.ReadAt(buf, mid*16)
+		_, err = indexFile.ReadAt(buf, mid*16)
 		if err != nil {
 			return 0, fmt.Errorf("failed to read index at entry %d: %w", mid, err)
 		}

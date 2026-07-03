@@ -73,9 +73,9 @@ func (b *Broker) Close() error {
 			errs = append(errs, fmt.Errorf("failed to flush index: %w", err))
 		}
 
-		for path, f := range log.readCache {
+		for path, f := range log.fdCache {
 			f.Close()
-			delete(log.readCache, path)
+			delete(log.fdCache, path)
 		}
 	}
 

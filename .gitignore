@@ -9,6 +9,3 @@ client
 stress/
 client/kafka
 *.py
-
-# personal notes
-docs

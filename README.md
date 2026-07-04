@@ -87,6 +87,8 @@ To maximize throughput and minimize latency, several low-level optimizations hav
 | **Latency** | 38.90 ms | **27.15 ms** |
 | **Peak Memory** | 668.70 MB | **9.42 MB** |
 
+![Comparison chart](docs/comparison_1.png)
+
 > **Disclaimer:** This comparison is intended for educational amusement. Apache Kafka is a highly distributed, partitioned, replicated, production-grade system running on the JVM with complex persistence and durability guarantees. Borges achieves its performance by operating entirely as a single-node broker without network replication, consumer rebalancing, or multi-partition coordination.
 
 ---

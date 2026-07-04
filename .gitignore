@@ -4,9 +4,11 @@ logs
 *.index
 *.exe
 
-# stress test
+# stress test and benchmarking
+client
 stress/
-stress2/
-client/stress
-client/stress2
 client/kafka
+*.py
+
+# personal notes
+docs

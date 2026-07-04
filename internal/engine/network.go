@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"encoding/binary"
@@ -16,7 +16,7 @@ import (
 const (
 	MaxPayloadSize   = 64 * 1024 // 64kb
 	MaxStringLen     = 65535     // max uint16 for topic/group names
-	MaxBatchMsgCount = 50        //50 messages per batch
+	MaxBatchMsgCount = 1001
 )
 
 func StartServer(broker *Broker) {

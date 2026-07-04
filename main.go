@@ -1,8 +1,10 @@
 package main
 
-const debug = false
+import (
+	"github.com/adnanmaja/borges/internal/engine"
+)
 
 func main() {
-	broker := NewBroker()
-	StartServer(broker)
+	broker := engine.NewBroker()
+	engine.StartServer(broker)
 }

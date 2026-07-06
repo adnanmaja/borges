@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+type Entry struct {
+	command string
+	term    int32
+}
+
 type Node struct {
 	port        int16
 	role        string
@@ -16,6 +21,8 @@ type Node struct {
 	heartbeatTick <-chan time.Time
 	electionTimer *time.Timer
 	lastHeartbeat time.Time
+
+	logs []Entry
 }
 
 func NewNode(port int16) *Node {

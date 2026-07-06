@@ -4,6 +4,8 @@ A minimal [Raft](https://raft.github.io/) consensus protocol implementation over
 
 ## How to Run
 
+### Running the Nodes
+
 Open three terminals and run one instance on each port:
 
 ```bash
@@ -12,7 +14,15 @@ go run . -port 8081
 go run . -port 8082
 ```
 
-All nodes start as **Candidate**. The first one to timeout and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
+All nodes start as **Candidate**. The first node to timeout and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
+
+### Running the Client
+
+To send a log entry (e.g., `"hii"`) to a node:
+
+```bash
+go run ./client -port 8080
+```
 
 ---
 
@@ -25,17 +35,17 @@ All nodes start as **Candidate**. The first one to timeout and gather a majority
        │
        ▼
 ┌─────────────┐
-│   raft.go   │  Node struct, constructor, and the main event loop.
+│   node.go   │  Node & Entry structs, constructor, and main event loop.
 └──────┬──────┘
        │
-├──────────────────┬──────────────────┐
-│                  │                  │
-▼                  ▼                  ▼
-┌───────────┐ ┌─────────┐ ┌─────────────┐
-│heartbeat.go│ │election.go│ │listener.go  │
-│Send/recv   │ │Vote      │ │TCP server   │
-│heartbeats  │ │requests  │ │& dispatcher │
-└───────────┘ └─────────┘ └─────────────┘
+├──────────────────┬──────────────────┬──────────────────┬──────────────────┐
+│                  │                  │                  │                  │
+▼                  ▼                  ▼                  ▼                  ▼
+┌───────────┐ ┌─────────┐ ┌─────────────┐ ┌─────────────┐
+│heartbeat.go│ │election.go│ │listener.go  │ │   log.go    │
+│Send        │ │Election  │ │TCP server   │ │Log write &  │
+│heartbeats  │ │campaign  │ │& dispatcher │ │replication  │
+└───────────┘ └─────────┘ └─────────────┘ └─────────────┘
 ```
 
 ### File Responsibilities
@@ -43,25 +53,32 @@ All nodes start as **Candidate**. The first one to timeout and gather a majority
 | File | Role |
 |---|---|
 | `main.go` | CLI flag parsing, node instantiation |
-| `raft.go` | `Node` struct, `NewNode()` constructor, `startLoop()` event loop |
-| `heartbeat.go` | Leader sends heartbeats, message frame encoding |
-| `election.go` | Election campaign (`ElectItself`), vote request/response, leader announcement |
-| `listener.go` | TCP listener, command parsing and dispatch |
+| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop |
+| `heartbeat.go` | Leader sends heartbeats |
+| `election.go` | Election campaign (`ElectItself`), vote request/response, victory announcement |
+| `listener.go` | TCP listener, command/opcode parsing and dispatch |
+| `log.go` | Log write / append functions, log replication protocol (`sendLog`) |
 
 ---
 
 ## Node State
 
 ```go
+type Entry struct {
+	command string
+	term    int32
+}
+
 type Node struct {
-    port        int16
-    role        string            // "Follower", "Candidate", or "Leader"
-    currentTerm int32
-    votedFor    int16
-    voteCount   int32
-    heartbeatTick <-chan time.Time // fires every 5s — Leader sends heartbeats
-    electionTimer *time.Timer      // fires on timeout — triggers election
-    lastHeartbeat time.Time
+	port          int16
+	role          string            // "Follower", "Candidate", or "Leader"
+	currentTerm   int32
+	votedFor      int16
+	voteCount     int32
+	heartbeatTick <-chan time.Time // fires every 5s — Leader sends heartbeats
+	electionTimer *time.Timer      // fires on timeout — triggers election
+	lastHeartbeat time.Time
+	logs          []Entry           // replicated log entries
 }
 ```
 
@@ -87,7 +104,7 @@ type Node struct {
 
 ## Event Loop (`startLoop`)
 
-The main loop runs in `raft.go` and multiplexes on two channels:
+The main loop runs in `node.go` and multiplexes on two channels:
 
 | Channel | When it fires | Action |
 |---|---|---|
@@ -102,29 +119,43 @@ All messages are TCP frames with a binary layout.
 
 ### Common Header
 
+All request frames start with a common header:
 ```
-┌────────┬─────────┬──────────┐
-│ 2B cmd │ 2B from │ (payload)│
-└────────┴─────────┴──────────┘
+┌───────────┬─────────┬──────────┐
+│ 2B opcode │ 2B from │ (payload)│
+└───────────┴─────────┴──────────┘
 ```
 
-### Command Types
+Response frames consist of a 2-byte status/response code:
+```
+┌───────────────┐
+│ 2B response   │
+└───────────────┘
+```
 
-| Command | Value | Direction | Payload |
-|---|---|---|---|
-| Heartbeat | `0x0001` | Leader → Follower | `10B` message text (padded) |
-| Vote Request | `0x0002` | Candidate → Peers | *(none beyond header)* |
-| Vote Granted | `0x0003` | Peer → Candidate | *(response only, 2B)* |
-| Leader Announce | `0x0004` | New Leader → Peers | *(none beyond header)* |
+### Opcode Types
+
+| Opcode | Command Name | Direction | Payload | Description |
+|---|---|---|---|---|
+| `0x0004` | Heartbeat | Leader → Follower | `10B` message text (`"heartbeat!"`) | Periodic keep-alive |
+| `0x0005` | Vote Request | Candidate → Peers | *(none beyond header)* | Candidate requests votes |
+| `0x0006` | Client Log Write | Client → Node | `4B` entry len + `entry` | Client sends new log command to node |
+| `0x0007` | Append Entries | Leader → Follower | `4B` term + `4B` entry len + `entry` | Leader replicates log entry to followers |
+
+### Response / Status Codes
+
+| Code | Value | Meaning |
+|---|---|---|
+| Success / Granted | `0x0001` | Vote granted or log write/append succeeded |
+| Failure / Denied | `0x0002` | Vote denied or log write/append failed |
 
 ---
 
 ## Current Limitations & Future Improvements
 
-- **No persistent state** — term, votedFor, and log are in-memory only
-- **No log replication** — heartbeats carry no log entries
-- **No split-brain handling** — term comparison is not implemented
-- **Crash recovery** — node restart loses all state
-- **No RPC retry** — dial failures are silently skipped
-- **Vote counting** — `RecapVote` counts replies but doesn't handle duplicates or rejections correctly
-- **Random sleep in election** — `time.Sleep` blocks the event loop; should use timer-based backoff instead
+- **No persistent state** — term, votedFor, and log are in-memory only.
+- **Incomplete Term Validation** — term verification is not fully implemented in voting and log appending logic.
+- **Crash recovery** — node restart loses all state.
+- **Connection Leaks** — `Heartbeat` broadcasts defer closing connections in a loop, keeping connections open longer than necessary.
+- **No RPC retry** — dial failures are printed but silently skipped.
+- **Vote counting** — `RecapVote` counts replies but doesn't handle duplicates or rejections correctly.

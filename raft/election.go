@@ -68,7 +68,7 @@ func (node *Node) RecapVote() {
 			if port == node.port {
 				continue
 			} else {
-				victorySpeech(node.port, port)
+				node.Heartbeat()
 			}
 		}
 	}
@@ -91,7 +91,7 @@ func sendVoteRequest(conn net.Conn, senderPort int16) (bool, error) {
 	frame := make([]byte, totalSize)
 	off := 0
 
-	binary.BigEndian.PutUint16(frame[off:], 0x0002)
+	binary.BigEndian.PutUint16(frame[off:], 0x0005)
 	off += 2
 
 	binary.BigEndian.PutUint16(frame[off:], uint16(senderPort))
@@ -109,34 +109,11 @@ func sendVoteRequest(conn net.Conn, senderPort int16) (bool, error) {
 
 	responseCode := binary.BigEndian.Uint16(responseFrame)
 
-	if responseCode == 0x0003 {
+	switch responseCode {
+	case 0x0001:
 		return true, nil
-	} else if responseCode == 0x0004 {
+	case 0x0002:
 		return false, nil
 	}
 	return false, nil
-}
-
-func victorySpeech(senderPort, destPort int16) {
-	// [0x0004]
-	address := fmt.Sprintf(":%d", destPort)
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
-	if err != nil {
-		panic(fmt.Sprintf("error starting messenger: %s", err))
-	}
-	defer conn.Close()
-
-	totalSize := 2 + 2
-	frame := make([]byte, totalSize)
-	off := 0
-
-	binary.BigEndian.PutUint16(frame[off:], 0x0004)
-	off += 2
-
-	binary.BigEndian.PutUint16(frame[off:], uint16(senderPort))
-
-	_, err = conn.Write(frame)
-	if err != nil {
-		panic(fmt.Sprintf("error sending vote request: %s\n", err))
-	}
 }

@@ -36,21 +36,21 @@ func (node *Node) listenForMessage(conn net.Conn) {
 	defer conn.Close()
 
 	for {
-		commandBuf := make([]byte, 2)
-		_, err := io.ReadFull(conn, commandBuf)
+		opcodeBuf := make([]byte, 2)
+		_, err := io.ReadFull(conn, opcodeBuf)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				fmt.Println("Client disconnected normally.")
+				// fmt.Println("Client disconnected normally.")
 			} else {
 				fmt.Println("\nClient disconnected abruptly:", err)
 			}
 			break
 		}
-		command := binary.BigEndian.Uint16(commandBuf)
-		fmt.Println("command:", command)
+		opcode := binary.BigEndian.Uint16(opcodeBuf)
+		fmt.Println("opcode:", opcode)
 
-		switch command {
-		case 0x0001: // heartbeat
+		switch opcode {
+		case 0x0004: // heartbeat
 			//[2B from][10B payload]
 			from, err := parseSender(conn)
 			if err != nil {
@@ -67,7 +67,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			fmt.Printf("[HEARTBEAT] message from %d: %s\n", from, string(message))
 			node.resetElectionTimer()
 
-		case 0x0002: // vote request
+		case 0x0005: // vote request
 			sender, err := parseSender(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -75,13 +75,66 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 			ok := node.Vote(sender)
 			if ok {
-				response := make([]byte, 2)
-				binary.BigEndian.PutUint16(response, 0x0003) // "you got my vote"
-				conn.Write(response)
+				responseSuccess(conn) // "you got my vote"
 			} else {
-				response := make([]byte, 2)
-				binary.BigEndian.PutUint16(response, 0x0004) // "who do you think you are"
-				conn.Write(response)
+				responseFail(conn) // "who do you think you are"
+			}
+		case 0x0006: // log entry, [2B from (irrelevant)][4B entry length][entry]
+			_, err := parseSender(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			entryLen, err := parse4Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			entry := make([]byte, entryLen)
+			if err := readFull(conn, entry); err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			ok := node.WriteLog(entry)
+			if ok {
+				responseSuccess(conn)
+			} else {
+				responseFail(conn)
+			}
+
+		case 0x0007: // append entries to followers. [2B from (irrelevant)][4B term][4B entry length][entry]
+			_, err := parseSender(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			term, err := parse4Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			entryLen, err := parse4Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			entry := make([]byte, entryLen)
+			if err := readFull(conn, entry); err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			ok := node.AppendLog(int32(term), entry)
+			if ok {
+				responseSuccess(conn)
+			} else {
+				responseFail(conn)
 			}
 		}
 	}
@@ -97,6 +150,16 @@ func parseSender(conn net.Conn) (int16, error) {
 	return int16(message), nil
 }
 
+func parse4Bytes(conn net.Conn) (int16, error) {
+	buf := make([]byte, 4)
+	if err := readFull(conn, buf); err != nil {
+		return 0, err
+	}
+
+	message := binary.BigEndian.Uint32(buf)
+	return int16(message), nil
+}
+
 func parseHeartbeat(conn net.Conn) ([]byte, error) {
 	buf := make([]byte, 10)
 	if err := readFull(conn, buf); err != nil {
@@ -109,4 +172,16 @@ func parseHeartbeat(conn net.Conn) ([]byte, error) {
 func readFull(conn net.Conn, buf []byte) error {
 	_, err := io.ReadFull(conn, buf)
 	return err
+}
+
+func responseSuccess(conn net.Conn) {
+	response := make([]byte, 2)
+	binary.BigEndian.PutUint16(response, 0x0001)
+	conn.Write(response)
+}
+
+func responseFail(conn net.Conn) {
+	response := make([]byte, 2)
+	binary.BigEndian.PutUint16(response, 0x0002)
+	conn.Write(response)
 }

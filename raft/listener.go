@@ -52,7 +52,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 		switch opcode {
 		case 0x0004: // heartbeat
 			//[2B from][10B payload]
-			from, err := parseSender(conn)
+			from, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -68,7 +68,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			node.resetElectionTimer()
 
 		case 0x0005: // vote request
-			sender, err := parseSender(conn)
+			sender, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -80,7 +80,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				responseFail(conn) // "who do you think you are"
 			}
 		case 0x0006: // log entry, [2B from (irrelevant)][4B entry length][entry]
-			_, err := parseSender(conn)
+			_, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -105,32 +105,67 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				responseFail(conn)
 			}
 
-		case 0x0007: // append entries to followers. [2B from (irrelevant)][4B term][4B entry length][entry]
-			_, err := parseSender(conn)
+		case 0x0007: // leader's request to append entries.
+			// [2B leader's port (irrelevant for now)][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][2B entryNum] + loop([4B entryLen][entry])
+			_, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			term, err := parse4Bytes(conn)
+			leaderTerm, err := parse4Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			entryLen, err := parse4Bytes(conn)
+			prevLogIdx, err := parse4Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			entry := make([]byte, entryLen)
-			if err := readFull(conn, entry); err != nil {
+			prevLogTerm, err := parse4Bytes(conn)
+			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			ok := node.AppendLog(int32(term), entry)
+			leaderCommit, err := parse4Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			entryNum, err := parse2Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			fmt.Println("[DEBUG] entryNum:", entryNum)
+
+			var entries []Entry
+			for range entryNum {
+				payloadLen, err := parse4Bytes(conn)
+				if err != nil {
+					fmt.Println("error:", err)
+					break
+				}
+
+				payload := make([]byte, payloadLen)
+				if err := readFull(conn, payload); err != nil {
+					fmt.Println("error:", err)
+					break
+				}
+
+				entries = append(entries, Entry{
+					payload: string(payload),
+					term:    int32(leaderTerm),
+				})
+			}
+
+			ok := node.AppendLog(int32(leaderTerm), int32(prevLogIdx), int32(prevLogTerm), int32(leaderCommit), entries)
 			if ok {
 				responseSuccess(conn)
 			} else {
@@ -140,7 +175,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 	}
 }
 
-func parseSender(conn net.Conn) (int16, error) {
+func parse2Bytes(conn net.Conn) (int16, error) {
 	buf := make([]byte, 2)
 	if err := readFull(conn, buf); err != nil {
 		return 0, err

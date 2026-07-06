@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 )
 
 type Entry struct {
-	command string
+	payload string
 	term    int32
 }
 
@@ -22,7 +23,12 @@ type Node struct {
 	electionTimer *time.Timer
 	lastHeartbeat time.Time
 
-	logs []Entry
+	logs        []Entry
+	commitIndex int32
+	nextIndex   map[int16]int32
+	matchIndex  map[int16]int32
+
+	mu sync.Mutex
 }
 
 func NewNode(port int16) *Node {
@@ -31,7 +37,7 @@ func NewNode(port int16) *Node {
 	electionTicker := time.NewTimer(time.Duration(randSec) * time.Second)
 	heartbeatTicker := time.NewTicker(5 * time.Second)
 
-	return &Node{
+	node := &Node{
 		port:          port,
 		role:          "Candidate",
 		electionTimer: electionTicker,
@@ -39,7 +45,25 @@ func NewNode(port int16) *Node {
 		voteCount:     0,
 		votedFor:      0,
 		lastHeartbeat: time.Now(),
+		logs: []Entry{
+			0: {payload: "", term: 0}, // fill index 0 with dummy data, so it starts appending at index 1
+		},
+		commitIndex: 0,
+		nextIndex:   make(map[int16]int32),
+		matchIndex:  make(map[int16]int32),
 	}
+
+	ports := []int16{8080, 8081, 8082}
+	for _, port := range ports {
+		if port == node.port {
+			continue
+		} else {
+			node.nextIndex[port] = 1
+			node.matchIndex[port] = 0
+		}
+	}
+
+	return node
 }
 
 func (node *Node) startLoop() {
@@ -66,15 +90,3 @@ func (node *Node) startLoop() {
 		}
 	}
 }
-
-// for {
-// 	min := 8
-// 	max := 18
-// 	randomSeconds := min + rand.Intn(max-min+1)
-// 	duration := time.Duration(randomSeconds) * time.Second
-
-// 	time.Sleep(duration)
-
-// 	fmt.Println("tick...")
-// 	node.Heartbeat()
-// }

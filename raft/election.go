@@ -25,7 +25,6 @@ func (node *Node) ElectItself() {
 				if port == node.port {
 					continue
 				} else {
-					// [0x0002][2B from]
 					conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 5*time.Second)
 					if err != nil {
 						fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
@@ -59,7 +58,7 @@ func (node *Node) RecapVote() {
 	node.voteCount++
 	fmt.Println("[ELECTION] Thank you!!")
 
-	if node.voteCount > 1 {
+	if node.voteCount >= 1 {
 		node.role = "Leader"
 		fmt.Println("[ELECTION] Im the leader now")
 		ports := []int16{8080, 8081, 8082}
@@ -69,6 +68,7 @@ func (node *Node) RecapVote() {
 				continue
 			} else {
 				node.Heartbeat()
+				node.nextIndex[port] = int32(len(node.logs))
 			}
 		}
 	}
@@ -87,6 +87,7 @@ func (node *Node) resetElectionTimer() {
 }
 
 func sendVoteRequest(conn net.Conn, senderPort int16) (bool, error) {
+	// [0x0005][2B from]
 	totalSize := 2 + 2
 	frame := make([]byte, totalSize)
 	off := 0

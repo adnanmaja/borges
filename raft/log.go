@@ -5,10 +5,23 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+type log struct {
+	segments       []*Segment
+	mu             sync.RWMutex
+	activeSegment  *Segment
+	activeIndex    *Index
+	segmentOffsets []int64
+	nextOffset     int64
+}
 
 type appendLogMsg struct { // append log message model
 	leaderTerm   int32
@@ -19,9 +32,55 @@ type appendLogMsg struct { // append log message model
 	entries      []Entry
 }
 
+func NewLog(port int16) *log {
+	l := &log{}
+
+	var savedOffsets []int64
+
+	files, _ := os.ReadDir(fmt.Sprintf("logs/%d", port))
+
+	for _, file := range files {
+		if !file.IsDir() && filepath.Ext(file.Name()) == ".log" {
+			fileName := strings.TrimSuffix(file.Name(), ".log")
+			baseOffset, _ := strconv.ParseInt(fileName, 10, 64)
+			savedOffsets = append(savedOffsets, baseOffset)
+		}
+	}
+
+	sort.Slice(savedOffsets, func(i, j int) bool { return savedOffsets[i] < savedOffsets[j] })
+	l.segmentOffsets = savedOffsets
+
+	latestOffset := l.segmentOffsets[len(l.segmentOffsets)-1]
+
+	l.activeSegment = NewSegment(port, latestOffset)
+	l.activeIndex = NewIndex(port, latestOffset, l.activeSegment.currentSize)
+
+	return l
+}
+
+func (node *Node) prepareSegment(size int64) (*Segment, int64) {
+
+	if (node.log.activeSegment.currentSize + size) > node.log.activeSegment.maxSize {
+		node.log.activeSegment.file.Close()
+		if node.log.activeIndex != nil {
+			node.log.activeIndex.file.Close()
+		}
+		node.log.segments = append(node.log.segments, node.log.activeSegment)
+
+		node.log.segmentOffsets = append(node.log.segmentOffsets, node.log.nextOffset)
+		node.log.activeSegment = NewSegment(node.port, node.log.segmentOffsets[len(node.log.segmentOffsets)-1])
+		node.log.activeIndex = NewIndex(node.port, node.log.segmentOffsets[len(node.log.segmentOffsets)-1], 0)
+	}
+
+	writeOffset := node.log.activeSegment.currentSize
+	node.log.activeSegment.currentSize += size
+
+	return node.log.activeSegment, writeOffset
+}
+
 func (node *Node) WriteLog(entry []byte) bool {
-	node.logs = append(node.logs, Entry{timestamp: time.Now().UnixMilli(), payload: string(entry), term: node.currentTerm})
-	writeToDisk(node.logs[len(node.logs)-1], node.port)
+	node.entryLogs = append(node.entryLogs, Entry{timestamp: time.Now().UnixMilli(), payload: string(entry), term: node.currentTerm})
+	node.writeToDisk(node.entryLogs[len(node.entryLogs)-1])
 
 	var successCount int32 = 1
 	var wg sync.WaitGroup
@@ -47,9 +106,9 @@ func (node *Node) WriteLog(entry []byte) bool {
 					leaderTerm:   node.currentTerm,
 					leaderPort:   node.port,
 					prevLogIndex: node.nextIndex[port] - 1,
-					prevLogTerm:  node.logs[node.nextIndex[port]-1].term,
+					prevLogTerm:  node.entryLogs[node.nextIndex[port]-1].term,
 					commitIndex:  node.commitIndex,
-					entries:      node.logs[node.nextIndex[port]:],
+					entries:      node.entryLogs[node.nextIndex[port]:],
 				}
 
 				ok, success, err := sendLog(conn, logMsg)
@@ -77,7 +136,7 @@ func (node *Node) WriteLog(entry []byte) bool {
 		}
 		wg.Wait()
 		if successCount > int32(len(ports)/2) {
-			node.commitIndex = int32(len(node.logs) - 1)
+			node.commitIndex = int32(len(node.entryLogs) - 1)
 			return true
 		}
 	}
@@ -89,24 +148,24 @@ func (node *Node) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit in
 		return false
 	}
 
-	if prevLogIdx >= int32(len(node.logs)) {
+	if prevLogIdx >= int32(len(node.entryLogs)) {
 		return false
 	}
 
-	if node.logs[prevLogIdx].term != prevLogTerm {
+	if node.entryLogs[prevLogIdx].term != prevLogTerm {
 		return false
 	}
 
-	node.logs = node.logs[:prevLogIdx+1]
+	node.entryLogs = node.entryLogs[:prevLogIdx+1]
 
 	for _, entry := range entries {
-		node.logs = append(node.logs, entry)
-		writeToDisk(entry, node.port)
+		node.entryLogs = append(node.entryLogs, entry)
+		node.writeToDisk(entry)
 		fmt.Println("[LOG] Appending the log entry:", string(entry.payload))
 	}
 
 	if leaderCommit > node.commitIndex {
-		node.commitIndex = min(leaderCommit, int32(len(node.logs)-1))
+		node.commitIndex = min(leaderCommit, int32(len(node.entryLogs)-1))
 	}
 
 	return true
@@ -175,7 +234,7 @@ func sendLog(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 	return false, false, nil
 }
 
-func writeToDisk(entry Entry, port int16) {
+func (node *Node) writeToDisk(entry Entry) {
 	// on disk payload: [8B timestamp][4B payload len][payload]
 
 	totalSize := 8 + 4 + len(entry.payload)
@@ -190,14 +249,13 @@ func writeToDisk(entry Entry, port int16) {
 
 	copy(buf[off:], []byte(entry.payload))
 
-	fmt.Println("[DEBUG] MkdirAll reached")
-
-	filePath := fmt.Sprintf("logs/%d/1.log", port)
-	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	segment, _ := node.prepareSegment(int64(totalSize))
+	_, err := segment.file.Write(buf)
 	if err != nil {
-		panic(fmt.Sprintf("log failed log fialed log failed: %s", err))
+		panic("writeToDisk failed")
 	}
-	file.Write(buf)
 
-	defer file.Close()
+	node.log.activeIndex.IndexWrite(node.log.nextOffset, int64(totalSize))
+
+	node.log.nextOffset++
 }

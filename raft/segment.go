@@ -1,4 +1,4 @@
-package engine
+package main
 
 import (
 	"fmt"
@@ -17,8 +17,8 @@ type Segment struct {
 	mu          sync.Mutex
 }
 
-func NewSegment(topic string, offset int64) *Segment {
-	filePath := fmt.Sprintf("logs/%s/%020d.log", topic, offset)
+func NewSegment(port int16, offset int64) *Segment {
+	filePath := fmt.Sprintf("logs/%d/%020d.log", port, offset)
 
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

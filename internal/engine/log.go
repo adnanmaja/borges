@@ -81,7 +81,7 @@ func NewLog(topic string, stopCh chan struct{}) *Log {
 		fmt.Println("[DEBUG] l.nextOffset:", l.nextOffset)
 	}
 
-	l.activeSegment = newSegment(l.topic, latestOffset)
+	l.activeSegment = NewSegment(l.topic, latestOffset)
 	l.activeIndex = newIndex(l.topic, latestOffset, l.activeSegment.currentSize)
 
 	go l.cleanOldFiles()
@@ -124,7 +124,7 @@ func (l *Log) prepareSegment(size int64) (*Segment, int64) {
 		l.segments = append(l.segments, l.activeSegment)
 
 		l.segmentOffsets = append(l.segmentOffsets, l.nextOffset)
-		l.activeSegment = newSegment(l.topic, l.segmentOffsets[len(l.segmentOffsets)-1])
+		l.activeSegment = NewSegment(l.topic, l.segmentOffsets[len(l.segmentOffsets)-1])
 		l.activeIndex = newIndex(l.topic, l.segmentOffsets[len(l.segmentOffsets)-1], 0)
 	}
 

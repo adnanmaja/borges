@@ -166,13 +166,13 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				}
 
 				entries = append(entries, Entry{
-					timestamp: int64(timestamp),
+					timestamp: timestamp,
 					payload:   string(payload),
 					term:      int32(leaderTerm),
 				})
 			}
 
-			ok := node.AppendLog(int32(leaderTerm), int32(prevLogIdx), int32(prevLogTerm), int32(leaderCommit), entries)
+			ok := node.AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit, entries)
 			if ok {
 				responseSuccess(conn)
 			} else {
@@ -192,24 +192,22 @@ func parse2Bytes(conn net.Conn) (int16, error) {
 	return int16(message), nil
 }
 
-func parse4Bytes(conn net.Conn) (int16, error) {
+func parse4Bytes(conn net.Conn) (int32, error) {
 	buf := make([]byte, 4)
 	if err := readFull(conn, buf); err != nil {
 		return 0, err
 	}
 
-	message := binary.BigEndian.Uint32(buf)
-	return int16(message), nil
+	return int32(binary.BigEndian.Uint32(buf)), nil
 }
 
-func parse8Bytes(conn net.Conn) (int16, error) {
+func parse8Bytes(conn net.Conn) (int64, error) {
 	buf := make([]byte, 8)
 	if err := readFull(conn, buf); err != nil {
 		return 0, err
 	}
 
-	message := binary.BigEndian.Uint32(buf)
-	return int16(message), nil
+	return int64(binary.BigEndian.Uint64(buf)), nil
 }
 
 func parseHeartbeat(conn net.Conn) ([]byte, error) {

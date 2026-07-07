@@ -68,7 +68,7 @@ func (node *Node) RecapVote() {
 				continue
 			} else {
 				node.Heartbeat()
-				node.nextIndex[port] = int32(len(node.entryLogs))
+				node.nextIndex[port] = int32(len(node.logs))
 			}
 		}
 	}

@@ -25,7 +25,7 @@ type Node struct {
 	electionTimer *time.Timer
 	lastHeartbeat time.Time
 
-	entryLogs   []Entry
+	logs   []Entry
 	commitIndex int32
 	nextIndex   map[int16]int32
 	matchIndex  map[int16]int32
@@ -49,19 +49,23 @@ func NewNode(port int16) *Node {
 		voteCount:     0,
 		votedFor:      0,
 		lastHeartbeat: time.Now(),
-		entryLogs: []Entry{
-			0: {payload: "", term: 0}, // fill index 0 with dummy data, so it starts appending at index 1
+		logs: []Entry{
+			0: {payload: "", term: 0},
 		},
 		commitIndex: 0,
 		nextIndex:   make(map[int16]int32),
 		matchIndex:  make(map[int16]int32),
 	}
 
-	node.log = NewLog(node.port)
-
 	ports := []int16{8080, 8081, 8082}
 	for _, port := range ports {
 		os.MkdirAll(fmt.Sprintf("logs/%d", port), 0755)
+	}
+
+	node.log = NewLog(node.port)
+	node.loadEntriesFromDisk()
+
+	for _, port := range ports {
 		if port == node.port {
 			continue
 		} else {

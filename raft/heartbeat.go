@@ -7,12 +7,6 @@ import (
 	"time"
 )
 
-type Message struct {
-	from    int16
-	to      int16
-	message string
-}
-
 func (node *Node) Heartbeat() {
 	ports := []int16{8080, 8081, 8082}
 

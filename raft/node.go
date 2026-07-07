@@ -3,13 +3,15 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"time"
 )
 
 type Entry struct {
-	payload string
-	term    int32
+	timestamp int64
+	payload   string
+	term      int32
 }
 
 type Node struct {
@@ -55,6 +57,7 @@ func NewNode(port int16) *Node {
 
 	ports := []int16{8080, 8081, 8082}
 	for _, port := range ports {
+		os.MkdirAll(fmt.Sprintf("logs/%d", port), 0755)
 		if port == node.port {
 			continue
 		} else {

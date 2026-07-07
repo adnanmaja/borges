@@ -4,12 +4,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type AppendLogMsg struct { // append log message model
+type appendLogMsg struct { // append log message model
 	leaderTerm   int32
 	leaderPort   int16
 	prevLogIndex int32
@@ -19,7 +20,8 @@ type AppendLogMsg struct { // append log message model
 }
 
 func (node *Node) WriteLog(entry []byte) bool {
-	node.logs = append(node.logs, Entry{payload: string(entry), term: node.currentTerm})
+	node.logs = append(node.logs, Entry{timestamp: time.Now().UnixMilli(), payload: string(entry), term: node.currentTerm})
+	writeToDisk(node.logs[len(node.logs)-1], node.port)
 
 	var successCount int32 = 1
 	var wg sync.WaitGroup
@@ -41,7 +43,7 @@ func (node *Node) WriteLog(entry []byte) bool {
 					fmt.Printf("[LOG] cannot reach %d: %s\n", port, err)
 					return
 				}
-				logMsg := AppendLogMsg{
+				logMsg := appendLogMsg{
 					leaderTerm:   node.currentTerm,
 					leaderPort:   node.port,
 					prevLogIndex: node.nextIndex[port] - 1,
@@ -99,6 +101,7 @@ func (node *Node) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit in
 
 	for _, entry := range entries {
 		node.logs = append(node.logs, entry)
+		writeToDisk(entry, node.port)
 		fmt.Println("[LOG] Appending the log entry:", string(entry.payload))
 	}
 
@@ -109,8 +112,8 @@ func (node *Node) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit in
 	return true
 }
 
-func sendLog(conn net.Conn, logMsg AppendLogMsg) (bool, bool, error) {
-	// [0x0007][2B from][4B term][4B prev log idx][4B prev log term][4B lead's commit index][2B num of entries] + loop([4B entry len][entry])
+func sendLog(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
+	// [0x0007][2B from][4B term][4B prev log idx][4B prev log term][4B lead's commit index][2B num of entries] + loop([8B timestamp][4B entry len][entry])
 	frameSize := 2 + 2 + 4 + 4 + 4 + 4 + 2
 	frame := make([]byte, frameSize)
 	off := 0
@@ -145,6 +148,9 @@ func sendLog(conn net.Conn, logMsg AppendLogMsg) (bool, bool, error) {
 	}
 
 	for i := 0; i < entriesCount; i++ {
+		timestampFrame := make([]byte, 8)
+		binary.BigEndian.PutUint64(timestampFrame, uint64(logMsg.entries[i].timestamp))
+		conn.Write(timestampFrame)
 		entryLen := make([]byte, 4)
 		binary.BigEndian.PutUint32(entryLen, uint32(len(logMsg.entries[i].payload)))
 		conn.Write(entryLen)
@@ -167,4 +173,31 @@ func sendLog(conn net.Conn, logMsg AppendLogMsg) (bool, bool, error) {
 		return true, false, nil
 	}
 	return false, false, nil
+}
+
+func writeToDisk(entry Entry, port int16) {
+	// on disk payload: [8B timestamp][4B payload len][payload]
+
+	totalSize := 8 + 4 + len(entry.payload)
+	buf := make([]byte, totalSize)
+	off := 0
+
+	binary.BigEndian.PutUint64(buf[off:], uint64(entry.timestamp))
+	off += 8
+
+	binary.BigEndian.PutUint32(buf[off:], uint32(len(entry.payload)))
+	off += 4
+
+	copy(buf[off:], []byte(entry.payload))
+
+	fmt.Println("[DEBUG] MkdirAll reached")
+
+	filePath := fmt.Sprintf("logs/%d/1.log", port)
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(fmt.Sprintf("log failed log fialed log failed: %s", err))
+	}
+	file.Write(buf)
+
+	defer file.Close()
 }

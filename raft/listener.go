@@ -79,7 +79,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			} else {
 				responseFail(conn) // "who do you think you are"
 			}
-		case 0x0006: // log entry, [2B from (irrelevant)][4B entry length][entry]
+		case 0x0006: // log entry, [2B from (irrelevant)][4B payload length][payload]
 			_, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -106,7 +106,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 		case 0x0007: // leader's request to append entries.
-			// [2B leader's port (irrelevant for now)][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][2B entryNum] + loop([4B entryLen][entry])
+			// [2B leader's port (irrelevant for now)][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][2B entryNum] + loop([8B timestamp][4B entryLen][entry])
 			_, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -147,6 +147,12 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 			var entries []Entry
 			for range entryNum {
+				timestamp, err := parse8Bytes(conn)
+				if err != nil {
+					fmt.Println("error:", err)
+					break
+				}
+
 				payloadLen, err := parse4Bytes(conn)
 				if err != nil {
 					fmt.Println("error:", err)
@@ -160,8 +166,9 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				}
 
 				entries = append(entries, Entry{
-					payload: string(payload),
-					term:    int32(leaderTerm),
+					timestamp: int64(timestamp),
+					payload:   string(payload),
+					term:      int32(leaderTerm),
 				})
 			}
 
@@ -187,6 +194,16 @@ func parse2Bytes(conn net.Conn) (int16, error) {
 
 func parse4Bytes(conn net.Conn) (int16, error) {
 	buf := make([]byte, 4)
+	if err := readFull(conn, buf); err != nil {
+		return 0, err
+	}
+
+	message := binary.BigEndian.Uint32(buf)
+	return int16(message), nil
+}
+
+func parse8Bytes(conn net.Conn) (int16, error) {
+	buf := make([]byte, 8)
 	if err := readFull(conn, buf); err != nil {
 		return 0, err
 	}

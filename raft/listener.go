@@ -178,6 +178,36 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			} else {
 				responseFail(conn)
 			}
+
+		case 0x0008: // client's consume request
+			// req: [2B from (irrelevant)][8B relative offset]
+			// res: [2B fail/success][8B timestamp][4B payload length][payload]
+			_, err := parse2Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			offsetTarget, err := parse8Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			entry, err := node.readLog(int64(offsetTarget))
+			if err != nil {
+				fmt.Println("error:", err)
+				responseFail(conn)
+				break
+			}
+
+			headerBuf := make([]byte, 14)
+			binary.BigEndian.PutUint16(headerBuf[0:2], 0x0001) // success
+			binary.BigEndian.PutUint64(headerBuf[2:10], uint64(entry.timestamp))
+			binary.BigEndian.PutUint32(headerBuf[10:14], uint32(len(entry.payload)))
+			conn.Write(headerBuf)
+			conn.Write([]byte(entry.payload))
+
 		}
 	}
 }

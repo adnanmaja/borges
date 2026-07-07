@@ -25,7 +25,7 @@ type Node struct {
 	electionTimer *time.Timer
 	lastHeartbeat time.Time
 
-	logs   []Entry
+	logs        []Entry
 	commitIndex int32
 	nextIndex   map[int16]int32
 	matchIndex  map[int16]int32
@@ -59,7 +59,7 @@ func NewNode(port int16) *Node {
 
 	ports := []int16{8080, 8081, 8082}
 	for _, port := range ports {
-		os.MkdirAll(fmt.Sprintf("logs/%d", port), 0755)
+		os.MkdirAll(fmt.Sprintf("data/%d/log", port), 0755)
 	}
 
 	node.log = NewLog(node.port)

@@ -15,7 +15,7 @@ type Index struct {
 }
 
 func NewIndex(port int16, offset int64, logSize int64) *Index {
-	filePath := fmt.Sprintf("logs/%d/%020d.index", port, offset)
+	filePath := fmt.Sprintf("data/%d/log/%020d.index", port, offset)
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {

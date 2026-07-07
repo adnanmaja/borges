@@ -312,3 +312,71 @@ func (node *Node) writeToDisk(entry Entry) {
 	node.log.activeIndex.IndexWrite(node.log.nextOffset, int64(totalSize))
 	node.log.nextOffset++
 }
+
+func (node *Node) findIndexFile(relativeOffset int64) string {
+	if len(node.log.segmentOffsets) == 0 {
+		return ""
+	}
+
+	lo, hi := 0, len(node.log.segmentOffsets)-1
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if node.log.segmentOffsets[mid] <= relativeOffset {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+
+	if node.log.segmentOffsets[lo] > relativeOffset {
+		return ""
+	}
+
+	return fmt.Sprintf("data/%d/log/%020d.index", node.port, node.log.segmentOffsets[lo])
+}
+
+func (node *Node) readLog(targetOffset int64) (Entry, error) {
+	node.log.mu.Lock()
+	indexPath := node.findIndexFile(targetOffset)
+
+	logPath := strings.TrimSuffix(indexPath, filepath.Ext(indexPath)) + ".log"
+	node.log.mu.Unlock()
+
+	indexFile, err := os.Open(indexPath)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	logFile, err := os.Open(logPath)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	absOffset, err := node.log.activeIndex.offsetLookup(indexFile, targetOffset)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	// each log on disk: [8B timestamp][4B payload len][payload]
+	headerBuf := make([]byte, 12)
+	_, err = logFile.ReadAt(headerBuf, int64(absOffset))
+	if err != nil {
+		return Entry{}, err
+	}
+
+	timestamp := binary.BigEndian.Uint64(headerBuf[0:8])
+	payloadLen := binary.BigEndian.Uint32(headerBuf[8:12])
+
+	payloadBuf := make([]byte, payloadLen)
+
+	_, err = logFile.ReadAt(payloadBuf, int64(absOffset)+12)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	return Entry{
+		term:      node.currentTerm,
+		timestamp: int64(timestamp),
+		payload:   string(payloadBuf),
+	}, nil
+}

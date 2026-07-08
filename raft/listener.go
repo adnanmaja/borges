@@ -87,19 +87,11 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			topicLen, err := readInt32(conn)
+			topic, err := parseTopic(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
-
-			topicBuf := make([]byte, topicLen)
-			err = readFull(conn, topicBuf)
-			if err != nil {
-				fmt.Println("error:", err)
-				break
-			}
-			topic := string(topicBuf)
 
 			entryLen, err := readInt32(conn)
 			if err != nil {
@@ -154,19 +146,11 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			topicLen, err := readInt32(conn)
+			topic, err := parseTopic(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
-
-			topicBuf := make([]byte, topicLen)
-			err = readFull(conn, topicBuf)
-			if err != nil {
-				fmt.Println("error:", err)
-				break
-			}
-			topic := string(topicBuf)
 
 			entryNum, err := readInt16(conn)
 			if err != nil {
@@ -218,19 +202,11 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			topicLen, err := readInt32(conn)
+			topic, err := parseTopic(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
-
-			topicBuf := make([]byte, topicLen)
-			err = readFull(conn, topicBuf)
-			if err != nil {
-				fmt.Println("error:", err)
-				break
-			}
-			topic := string(topicBuf)
 
 			offsetTarget, err := readInt64(conn)
 			if err != nil {
@@ -265,7 +241,72 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				conn.Write([]byte(entry.payload))
 			}
 
+		case 0x0009: // client's commit offset
+			// incoming: [4B group id len][group id][4B topic len][topic][8B offset commit]
+			// response: [2B response code]
+			groupIdLen, err := readInt32(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			groupIdBuf := make([]byte, groupIdLen)
+			err = readFull(conn, groupIdBuf)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			groupId := string(groupIdBuf)
+
+			topic, err := parseTopic(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			offsetCommit, err := readInt64(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			node.broker.SaveOffset(groupId, topic, offsetCommit)
+
+			responseSuccess(conn)
+
+		case 0x0010: // fetch offset
+			// incoming: [4B group len][group id][4B topic len][topic]
+			// response: [2B response code][8B offset]
+			groupIdLen, err := readInt32(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			groupIdBuf := make([]byte, groupIdLen)
+			err = readFull(conn, groupIdBuf)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			groupId := string(groupIdBuf)
+
+			topic, err := parseTopic(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			offset := node.broker.FetchOffset(groupId, topic)
+
+			resFrame := make([]byte, 10)
+			binary.BigEndian.PutUint16(resFrame[0:2], 0x0001)
+			binary.BigEndian.PutUint64(resFrame[2:10], uint64(offset))
+			_, err = conn.Write(resFrame)
+			if err != nil {
+				responseFail(conn)
+				fmt.Println("error:", err)
+			}
 		}
+
 	}
 }
 
@@ -321,4 +362,18 @@ func responseFail(conn net.Conn) {
 	response := make([]byte, 2)
 	binary.BigEndian.PutUint16(response, 0x0002)
 	conn.Write(response)
+}
+
+func parseTopic(conn net.Conn) (string, error) {
+	topicLen, err := readInt32(conn)
+	if err != nil {
+		return "", err
+	}
+
+	topicBuf := make([]byte, topicLen)
+	err = readFull(conn, topicBuf)
+	if err != nil {
+		return "", err
+	}
+	return string(topicBuf), nil
 }

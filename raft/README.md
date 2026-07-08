@@ -42,26 +42,28 @@ Depending on the configuration in `client.go`, this will either:
 │   node.go   │  Node & Entry structs, constructor, and main event loop.
 └──────┬──────┘
        │
-├──────────────────┬──────────────────┬──────────────────┬──────────────────┐
-│                  │                  │                  │                  │
-▼                  ▼                  ▼                  ▼                  ▼
-┌───────────┐ ┌─────────┐ ┌─────────────┐ ┌─────────────┐
-│heartbeat.go│ │election.go│ │listener.go  │ │   log.go    │
-│Send        │ │Election  │ │TCP server   │ │Log write &  │
-│heartbeats  │ │campaign  │ │& dispatcher │ │replication  │
-└───────────┘ └─────────┘ └──────┬──────┘ └──────┬──────┘
-                                 │               │
-                                 └──────┬────────┘
-                                        │
-                                        ▼
-                                 ┌─────────────┐
-                                 │ segment.go  │  Log segment files on disk
-                                 └──────┬──────┘
-                                        │
-                                        ▼
-                                 ┌─────────────┐
-                                 │  index.go   │  Index lookup files on disk
-                                 └─────────────┘
+├──────────────────┬──────────────────┬──────────────────┬──────────────────┬─────────────────┐
+│                  │                  │                  │                  │                 │
+▼                  ▼                  ▼                  ▼                  ▼                 ▼
+┌───────────┐ ┌─────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+│heartbeat.go│ │election.go│ │listener.go  │ │  broker.go  │ │   log.go    │
+│Send        │ │Election  │ │TCP server   │ │Multi-topic  │ │Log write,   │
+│heartbeats  │ │campaign  │ │& dispatcher │ │log registry │ │append, read │
+└───────────┘ └─────────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+                                 │               │               │
+                                 │               └───────┬───────┘
+                                 │                       │
+                                 └───────────┬───────────┘
+                                             │
+                                             ▼
+                                      ┌─────────────┐
+                                      │ segment.go  │  Log segment files on disk
+                                      └──────┬──────┘
+                                             │
+                                             ▼
+                                      ┌─────────────┐
+                                      │  index.go   │  Index lookup files on disk
+                                      └─────────────┘
 ```
 
 ### File Responsibilities
@@ -71,9 +73,10 @@ Depending on the configuration in `client.go`, this will either:
 | `main.go` | CLI flag parsing, node instantiation |
 | `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop |
 | `heartbeat.go` | Leader sends heartbeats |
-| `election.go` | Election campaign (`ElectItself`), vote request/response, victory announcement |
+| `election.go` | Election campaign (`StartElection`), vote request/response, victory announcement (`CountVote`) |
 | `listener.go` | TCP listener, command/opcode parsing, and dispatching client reads/writes and raft requests |
-| `log.go` | Log manager (`log` struct), write/append functions, load from disk, wire-level log transmission, and disk log file management |
+| `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances |
+| `log.go` | Per-topic log manager (`Log` struct), write/append/read functions, wire-level log transmission, and disk log file management |
 | `segment.go` | Representation of individual `.log` data files (max 1MB) |
 | `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
 
@@ -94,15 +97,15 @@ type Node struct {
 	currentTerm   int32
 	votedFor      int16
 	voteCount     int32
-	heartbeatTick <-chan time.Time // fires every 5s — Leader sends heartbeats
+	heartbeat     <-chan time.Time // fires every 5s — Leader sends heartbeats
 	electionTimer *time.Timer      // fires on timeout — triggers election
 	lastHeartbeat time.Time
 
-	logs        []Entry           // replicated log entries (1-based index)
+	entries     []Entry           // replicated log entries (1-based index)
 	commitIndex int32             // index of highest log entry known to be committed
 	nextIndex   map[int16]int32   // for each server, index of the next log entry to send
 	matchIndex  map[int16]int32   // for each server, index of highest log entry known to be replicated
-	log         *log              // log persistence manager (handles segments/index)
+	broker      *Broker           // multi-topic log registry
 
 	mu sync.Mutex                 // protects node state access
 }
@@ -134,8 +137,8 @@ The main loop runs in `node.go` and multiplexes on two channels:
 
 | Channel | When it fires | Action |
 |---|---|---|
-| `heartbeatTick` | Every 5 seconds | If **Leader**, broadcast `Heartbeat()` to all peers |
-| `electionTimer.C` | After random timeout (8–18s) | If not Leader, call `ElectItself()` |
+| `heartbeat` | Every 5 seconds | If **Leader**, broadcast `Heartbeat()` to all peers |
+| `electionTimer.C` | After random timeout (8–18s) | If not Leader, call `StartElection()` |
 
 ---
 
@@ -165,17 +168,17 @@ Response frames consist of a 2-byte status/response code:
 |---|---|---|---|---|
 | `0x0004` | Heartbeat | Leader → Follower | `10B` message text (`"heartbeat!"`) | Periodic keep-alive |
 | `0x0005` | Vote Request | Candidate → Peers | *(none beyond header)* | Candidate requests votes |
-| `0x0006` | Client Log Write | Client → Node | `4B` payload len + `payload` | Client sends new log command to node |
+| `0x0006` | Client Log Write | Client → Node | `4B` topic len + `topic` + `4B` payload len + `payload` | Client sends new log command to a specific topic |
 | `0x0007` | Append Entries | Leader → Follower | See detailed payload below | Leader replicates log entries to followers |
-| `0x0008` | Client Consume Request | Client → Node | `8B` relative offset | Client requests a log entry by offset |
+| `0x0008` | Client Consume Request | Client → Node | `4B` topic len + `topic` + `8B` start offset + `4B` size limit | Client requests log entries by topic, offset, and count |
 
 #### Append Entries (`0x0007`) Payload Details
 
 The `0x0007` payload structure is:
 ```
-┌─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬───────────────────────────┐
-│ 4B leadTerm │ 4B prevIdx  │ 4B prevTerm │ 4B commitIdx│ 2B entryNum │ (entryNum * entry structs)│
-└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴───────────────────────────┘
+┌─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬───────────┬───────────────────────────┐
+│ 4B leadTerm │ 4B prevIdx  │ 4B prevTerm │ 4B commitIdx│ 4B topicLen │    topic    │ 2B entryNum│ (entryNum * entry structs)│
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴───────────┴───────────────────────────┘
 ```
 Where each entry struct is:
 ```
@@ -188,6 +191,8 @@ Where each entry struct is:
 * **prevIdx** (`4B int32`): Index of log entry immediately preceding new ones.
 * **prevTerm** (`4B int32`): Term of `prevIdx` entry.
 * **commitIdx** (`4B int32`): Leader's commit index.
+* **topicLen** (`4B int32`): Length of the topic name.
+* **topic** (`topicLen` bytes): The topic name this entry belongs to.
 * **entryNum** (`2B int16`): Number of log entries being sent (can be 0 for heartbeat/probe, but currently heartbeat uses `0x0004`).
 * **timestamp** (`8B int64`): Millisecond Unix timestamp of when the entry was created.
 * **entryLen** (`4B int32`): The log command string length.
@@ -197,29 +202,30 @@ Where each entry struct is:
 
 The `0x0008` request payload structure is:
 ```
-┌────────────────────┐
-│ 8B relativeOffset  │
-└────────────────────┘
+┌──────────────┬──────────────┬───────────────────┬──────────────┐
+│ 4B topicLen  │    topic     │ 8B startOffset    │ 4B sizeLimit │
+└──────────────┴──────────────┴───────────────────┴──────────────┘
 ```
 
-* **relativeOffset** (`8B int64`): The target relative index/offset of the log entry to retrieve from disk.
+* **topicLen** (`4B int32`): Length of the topic name.
+* **topic** (`topicLen` bytes): The topic name to consume from.
+* **startOffset** (`8B int64`): The starting relative offset of log entries to retrieve.
+* **sizeLimit** (`4B int32`): Maximum number of entries to return.
 
 The response to `0x0008` starts with a 2-byte response code:
 * **Success (`0x0001`)** response layout:
+
   ```
-  ┌─────────────┬──────────────┬───────────────┬────────────────────────┐
-  │ 2B status   │ 8B timestamp │ 4B payloadLen │ payload (payloadLen B) │
-  └─────────────┴──────────────┴───────────────┴────────────────────────┘
+  [2B status success][4B entryCount](entryCount * [8B timestamp][4B payloadLen][payload])
   ```
   * **status** (`2B uint16`): Success status code (`0x0001`).
-  * **timestamp** (`8B int64`): Timestamp of the stored log entry.
+  * **entryCount** (`4B int32`): Number of log entries being returned.
+  * **timestamp** (`8B int64`): Timestamp of a log entry.
   * **payloadLen** (`4B uint32`): Length of the log payload.
   * **payload**: The string value of the entry's payload.
 * **Failure (`0x0002`)** response layout:
   ```
-  ┌─────────────┐
-  │ 2B status   │
-  └─────────────┘
+    [2B status code]
   ```
   * **status** (`2B uint16`): Failure status code (`0x0002`).
 
@@ -236,23 +242,19 @@ The response to `0x0008` starts with a 2-byte response code:
 
 The node implements segmented log persistence with accompanying index files to optimize retrieval:
 
-1. **Log Segments**: Node logs are stored on disk inside `data/<port>/log/` as `<offset>.log` files (e.g. `00000000000000000000.log`). Each file represents a log segment with a maximum size limit of 1MB.
+1. **Log Segments**: Per-topic log files are stored on disk inside `data/<port>/log/<topic>/` as `<offset>.log` files (e.g. `00000000000000000000.log`). Each file represents a log segment with a maximum size limit of 1MB.
 2. **Index Files**: For each segment, a companion `.index` file (e.g. `<offset>.index`) is created. It stores 16-byte index entries with the binary layout:
-   ```
-   ┌─────────────────────┬─────────────────────┐
-   │  8B relativeOffset  │  8B absoluteOffset  │
-   └─────────────────────┴─────────────────────┘
-   ```
+    ```
+   [8B relativeOffset][8B byteOffset]
+    ```
    This is used to perform high-performance binary search lookups mapping a target relative offset directly to a byte offset position in the corresponding segment log file.
 3. **Log Disk Format**:
    Each entry written to a `.log` file has the following binary layout:
    ```
-   ┌────────────────┬─────────────────┬──────────────┐
-   │  8B timestamp  │  4B payloadLen  │   payload    │
-   └────────────────┴─────────────────┴──────────────┘
+   [8B timestamp][4B payloadLen][payload]
    ```
 4. **Startup Recovery**:
-   When a node starts up, it reads existing segments from the disk via `loadEntriesFromDisk()` to populate the in-memory logs slice. Note: Directory setup and initialization logs are configured under `logs/<port>/` at initialization.
+   When a node starts up, it creates per-topic directories under `data/<port>/log/<topic>/`. In-memory entry recovery from disk segments is not yet re-implemented for the multi-topic layout.
 
 ---
 
@@ -263,4 +265,3 @@ The node implements segmented log persistence with accompanying index files to o
 * **Connection Leaks** — `Heartbeat` broadcasts defer closing connections in a loop, keeping connections open longer than necessary.
 * **No RPC retry** — Dial failures are printed but silently skipped.
 * **Simplistic Vote Counting** — Election victory triggers on the first positive response (`voteCount >= 1`) rather than verifying a true majority of live nodes.
-* **Topics**

@@ -258,11 +258,9 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			conn.Write(headerFrame)
 
 			for _, entry := range entries {
-				fmt.Printf("[DEBUG] timestamp:%d payload:%s\n", entry.timestamp, entry.payload)
 				headerBuf := make([]byte, 12)
 				binary.BigEndian.PutUint64(headerBuf[0:8], uint64(entry.timestamp))
 				binary.BigEndian.PutUint32(headerBuf[8:12], uint32(len(entry.payload)))
-				fmt.Println("[DEBUG] headerBuf:", headerBuf)
 				conn.Write(headerBuf)
 				conn.Write([]byte(entry.payload))
 			}

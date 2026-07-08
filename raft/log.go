@@ -84,45 +84,6 @@ func createInitFile(port int16) {
 	}
 }
 
-// func (node *Node) loadEntriesFromDisk() {
-// 	l := node.log
-// 	l.mu.Lock()
-// 	offsets := l.segmentOffsets
-// 	l.mu.Unlock()
-
-// 	for _, baseOffset := range offsets {
-// 		logPath := fmt.Sprintf("logs/%d/%020d.log", node.port, baseOffset)
-// 		logFile, err := os.Open(logPath)
-// 		if err != nil {
-// 			continue
-// 		}
-
-// 		for {
-// 			header := make([]byte, 12)
-// 			_, err := logFile.Read(header)
-// 			if err != nil {
-// 				break
-// 			}
-// 			timestamp := int64(binary.BigEndian.Uint64(header[0:8]))
-// 			payloadLen := binary.BigEndian.Uint32(header[8:12])
-
-// 			payload := make([]byte, payloadLen)
-// 			_, err = logFile.Read(payload)
-// 			if err != nil {
-// 				break
-// 			}
-
-// 			node.logs = append(node.logs, Entry{
-// 				timestamp: timestamp,
-// 				payload:   string(payload),
-// 				term:      0,
-// 			})
-// 		}
-
-// 		logFile.Close()
-// 	}
-// }
-
 func (l *Log) prepareSegment(size int64, port int16) (*Segment, int64) {
 	if (l.activeSegment.currentSize + size) > l.activeSegment.maxSize {
 		l.activeSegment.file.Close()

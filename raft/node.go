@@ -63,7 +63,6 @@ func NewNode(port int16) *Node {
 	}
 
 	node.broker = NewBroker()
-	// node.loadEntriesFromDisk()
 
 	for _, port := range ports {
 		if port == node.port {

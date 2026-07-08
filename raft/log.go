@@ -113,7 +113,6 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 	fmt.Println("[LOG] Appending the log entry:", string(entry))
 
 	if node.role == "Leader" {
-		ports := []int16{8080, 8081, 8082}
 		for _, port := range ports {
 			if port == node.port {
 				continue

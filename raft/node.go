@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -47,7 +48,6 @@ func NewNode(port int16) *Node {
 		electionTimer: electionTicker,
 		heartbeat:     heartbeatTicker.C,
 		voteCount:     0,
-		votedFor:      0,
 		lastHeartbeat: time.Now(),
 		entries: []Entry{
 			0: {payload: "", term: 0},
@@ -63,6 +63,10 @@ func NewNode(port int16) *Node {
 	}
 
 	node.broker = NewBroker()
+	node.loadStates()
+	go node.saveSnapshot(node.broker)
+	go node.saveStates()
+	node.loadSnapshot(node.broker)
 
 	for _, port := range ports {
 		if port == node.port {
@@ -99,4 +103,61 @@ func (node *Node) startLoop() {
 			}
 		}
 	}
+}
+
+func (node *Node) saveStates() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		node.mu.Lock()
+		data, err := json.Marshal(struct {
+			CurrentTerm int32 `json:"currentTerm"`
+			VotedFor    int16 `json:"votedFor"`
+		}{
+			CurrentTerm: node.currentTerm,
+			VotedFor:    node.votedFor,
+		})
+		node.mu.Unlock()
+
+		path := fmt.Sprintf("data/%d/states.json", node.port)
+		err = os.WriteFile(path, data, 0644)
+		if err != nil {
+			fmt.Println("error writing file:", err)
+			return
+		}
+	}
+}
+
+func (node *Node) loadStates() {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	path := fmt.Sprintf("data/%d/states.json", node.port)
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		node.currentTerm = 0
+		node.votedFor = 0
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Println("error reading file:", err)
+		return
+	}
+
+	var state struct {
+		CurrentTerm int32 `json:"currentTerm"`
+		VotedFor    int16 `json:"votedFor"`
+	}
+
+	err = json.Unmarshal(data, &state)
+	if err != nil {
+		fmt.Println("error unmarshaling json:", err)
+		return
+	}
+
+	node.currentTerm = state.CurrentTerm
+	node.votedFor = state.VotedFor
 }

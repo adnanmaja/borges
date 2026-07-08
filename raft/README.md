@@ -16,19 +16,6 @@ go run . -port 8082
 
 All nodes start as **Candidate**. The first node to timeout and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
 
-### Running the Client
-
-The client (located in `./client`) supports both log entry production and consumption. To run the client:
-
-```bash
-go run ./client -port 8080
-```
-
-Depending on the configuration in `client.go`, this will either:
-* **Produce** a new log entry (`"hii"`) to the node.
-* **Consume** log entries from the node starting at a specific offset.
-
----
 
 ## Architecture
 
@@ -71,11 +58,11 @@ Depending on the configuration in `client.go`, this will either:
 | File | Role |
 |---|---|
 | `main.go` | CLI flag parsing, node instantiation |
-| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop |
+| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, background goroutines for periodic state/snapshot persistence |
 | `heartbeat.go` | Leader sends heartbeats |
 | `election.go` | Election campaign (`StartElection`), vote request/response, victory announcement (`CountVote`) |
 | `listener.go` | TCP listener, command/opcode parsing, and dispatching client reads/writes and raft requests |
-| `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances |
+| `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence |
 | `log.go` | Per-topic log manager (`Log` struct), write/append/read functions, wire-level log transmission, and disk log file management |
 | `segment.go` | Representation of individual `.log` data files (max 1MB) |
 | `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
@@ -133,7 +120,7 @@ type Node struct {
 
 ## Event Loop (`startLoop`)
 
-The main loop runs in `node.go` and multiplexes on two channels:
+The main loop runs in `node.go` and multiplexes on two channels. On startup, two background goroutines are also launched for periodic disk persistence:
 
 | Channel | When it fires | Action |
 |---|---|---|
@@ -171,6 +158,8 @@ Response frames consist of a 2-byte status/response code:
 | `0x0006` | Client Log Write | Client → Node | `4B` topic len + `topic` + `4B` payload len + `payload` | Client sends new log command to a specific topic |
 | `0x0007` | Append Entries | Leader → Follower | See detailed payload below | Leader replicates log entries to followers |
 | `0x0008` | Client Consume Request | Client → Node | `4B` topic len + `topic` + `8B` start offset + `4B` size limit | Client requests log entries by topic, offset, and count |
+| `0x0009` | Commit Offset | Client → Node | `4B` group id len + `group id` + `4B` topic len + `topic` + `8B` offset commit | Client commits a consumer offset for a group/topic |
+| `0x0010` | Fetch Offset | Client → Node | `4B` group id len + `group id` + `4B` topic len + `topic` | Client retrieves a previously committed offset for a group/topic |
 
 #### Append Entries (`0x0007`) Payload Details
 
@@ -229,6 +218,40 @@ The response to `0x0008` starts with a 2-byte response code:
   ```
   * **status** (`2B uint16`): Failure status code (`0x0002`).
 
+#### Commit Offset (`0x0009`) Payload Details
+
+```
+┌──────────────────┬────────────┬──────────────┬──────────┬──────────────────┐
+│ 4B groupIdLen    │  groupId   │ 4B topicLen  │  topic   │ 8B offsetCommit  │
+└──────────────────┴────────────┴──────────────┴──────────┴──────────────────┘
+```
+
+* **groupIdLen** (`4B int32`): Length of the consumer group id.
+* **groupId** (`groupIdLen` bytes): Consumer group identifier.
+* **topicLen** (`4B int32`): Length of the topic name.
+* **topic** (`topicLen` bytes): Topic name.
+* **offsetCommit** (`8B int64`): Offset value to commit for this group+topic.
+
+Response is a 2-byte status code.
+
+#### Fetch Offset (`0x0010`) Payload Details
+
+```
+┌──────────────────┬────────────┬──────────────┬──────────┐
+│ 4B groupIdLen    │  groupId   │ 4B topicLen  │  topic   │
+└──────────────────┴────────────┴──────────────┴──────────┘
+```
+
+* **groupIdLen** (`4B int32`): Length of the consumer group id.
+* **groupId** (`groupIdLen` bytes): Consumer group identifier.
+* **topicLen** (`4B int32`): Length of the topic name.
+* **topic** (`topicLen` bytes): Topic name.
+
+The response to `0x0010` starts with a 2-byte response code followed by the offset:
+```
+[2B status success][8B offset]
+```
+
 ### Response / Status Codes (Common)
 
 | Code | Value | Meaning |
@@ -237,6 +260,17 @@ The response to `0x0008` starts with a 2-byte response code:
 | Failure / Denied | `0x0002` | Vote denied, log write/append failed, or consume failed |
 
 ---
+
+## Background Persistence Goroutines
+
+Two goroutines run in the background from `NewNode()` to periodically persist state to disk:
+
+| Goroutine | Interval | Persists | File |
+|---|---|---|---|
+| `saveStates` | Every 10s | `currentTerm` and `votedFor` to JSON | `data/<port>/states.json` |
+| `saveSnapshot` | Every 10s | `Broker.offsets` (consumer-group offset map) to JSON | `data/<port>/offsets_sanpshot.json` |
+
+On startup, `loadStates()` and `loadSnapshot()` read these files back to restore the last known state.
 
 ## Log Persistence (WAL & Indexing)
 
@@ -260,8 +294,6 @@ The node implements segmented log persistence with accompanying index files to o
 
 ## Current Limitations & Future Improvements
 
-* **In-Memory Volatile Metadata** — Node terms and election state (`votedFor`, `currentTerm`) are stored only in memory. A node restart resets these, preventing a complete crash recovery.
-* **Incomplete Term Validation in Voting** — Term verification is not implemented in the voting process.
+* **In-Memory Volatile Metadata** — Node terms and election state (`votedFor`, `currentTerm`) are persisted to disk every 10s (see [Background Persistence Goroutines](#background-persistence-goroutines)), but recent changes between ticks may be lost on crash.
 * **Connection Leaks** — `Heartbeat` broadcasts defer closing connections in a loop, keeping connections open longer than necessary.
 * **No RPC retry** — Dial failures are printed but silently skipped.
-* **Simplistic Vote Counting** — Election victory triggers on the first positive response (`voteCount >= 1`) rather than verifying a true majority of live nodes.

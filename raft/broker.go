@@ -1,6 +1,12 @@
 package main
 
-import "sync"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+)
 
 type Broker struct {
 	logs    map[string]*Log
@@ -49,4 +55,49 @@ func (b *Broker) FetchOffset(groupId, topic string) int64 {
 	}
 
 	return 0 //default
+}
+
+func (node *Node) saveSnapshot(b *Broker) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		b.mu.Lock()
+		data, err := json.Marshal(b.offsets)
+		b.mu.Unlock()
+		if err != nil {
+			fmt.Println("error marshaling:", err)
+			continue
+		}
+
+		snapshotPath := fmt.Sprintf("data/%d/offsets_sanpshot.json", node.port)
+		tmpPath := snapshotPath + ".tmp"
+
+		err = os.WriteFile(tmpPath, data, 0644)
+		if err != nil {
+			fmt.Println("error writefile:", err)
+			continue
+		}
+
+		os.Rename(tmpPath, snapshotPath)
+	}
+}
+
+func (node *Node) loadSnapshot(b *Broker) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	snapshotPath := fmt.Sprintf("data/%d/offsets_sanpshot.json", node.port)
+
+	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
+		b.offsets = make(map[string]map[string]int64)
+		return nil
+	}
+
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(data, &b.offsets)
 }

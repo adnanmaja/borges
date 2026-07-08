@@ -8,8 +8,6 @@ import (
 )
 
 func (node *Node) Heartbeat() {
-	ports := []int16{8080, 8081, 8082}
-
 	for _, port := range ports {
 		if port == node.port {
 			continue

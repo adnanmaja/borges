@@ -19,7 +19,6 @@ func (node *Node) StartElection() {
 			node.role = "Follower"
 		} else {
 			node.votedFor = node.port
-			ports := []int16{8080, 8081, 8082}
 
 			for _, port := range ports {
 				if port == node.port {
@@ -30,7 +29,9 @@ func (node *Node) StartElection() {
 						fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
 						continue
 					}
-					granted, err := sendVoteRequest(conn, node.port)
+					lastLogIndex := len(node.entries) - 1
+					lastLogTerm := node.entries[lastLogIndex].term
+					granted, err := sendVoteRequest(conn, node.port, node.currentTerm, int32(lastLogIndex), lastLogTerm)
 					fmt.Println("[ELECTION] Everybody please vote for me")
 					if granted {
 						conn.Close()
@@ -41,27 +42,42 @@ func (node *Node) StartElection() {
 			}
 		}
 	}
-
 }
 
-func (node *Node) Vote(target int16) bool {
+func (node *Node) Vote(target int16, term, lastLogIndex, lastLogTerm int32) bool {
+	var voteGranted bool = false
 	if node.votedFor != 0 {
-		return false
-	} else {
-		node.votedFor = target
-		fmt.Println("[ELECTION] I voted for", node.votedFor)
-		return true
+		return voteGranted
 	}
+
+	if term < node.currentTerm {
+		return voteGranted
+	}
+
+	if term > node.currentTerm {
+		node.currentTerm = term
+		node.votedFor = 0
+	}
+
+	currentLastLogTerm := node.entries[len(node.entries)-1].term
+	currentLastLogIndex := len(node.entries) - 1
+
+	if lastLogTerm > currentLastLogTerm || (lastLogTerm == currentLastLogTerm && lastLogIndex >= int32(currentLastLogIndex)) {
+		voteGranted = true
+	}
+
+	node.votedFor = target
+	fmt.Println("[ELECTION] I voted for", node.votedFor)
+	return true
 }
 
 func (node *Node) CountVote() {
 	node.voteCount++
 	fmt.Println("[ELECTION] Thank you!!")
 
-	if node.voteCount >= 1 {
+	if node.voteCount >= int32((len(ports))/2) {
 		node.role = "Leader"
 		fmt.Println("[ELECTION] Im the leader now")
-		ports := []int16{8080, 8081, 8082}
 
 		for _, port := range ports {
 			if port == node.port {
@@ -86,16 +102,21 @@ func (node *Node) resetElectionTimer() {
 	node.electionTimer.Reset(time.Duration(randSec) * time.Second)
 }
 
-func sendVoteRequest(conn net.Conn, senderPort int16) (bool, error) {
-	// [0x0005][2B from]
-	totalSize := 2 + 2
+func sendVoteRequest(conn net.Conn, senderPort int16, term, lastLogIndex, lastLogTerm int32) (bool, error) {
+	// [0x0005][2B from][4B sender's term][4B lastLogIndex][4B lastLogTerm]
+	totalSize := 2 + 2 + 4 + 4 + 4
 	frame := make([]byte, totalSize)
 	off := 0
 
 	binary.BigEndian.PutUint16(frame[off:], 0x0005)
 	off += 2
-
 	binary.BigEndian.PutUint16(frame[off:], uint16(senderPort))
+	off += 2
+	binary.BigEndian.PutUint32(frame[off:], uint32(term))
+	off += 4
+	binary.BigEndian.PutUint32(frame[off:], uint32(lastLogIndex))
+	off += 4
+	binary.BigEndian.PutUint32(frame[off:], uint32(lastLogTerm))
 
 	_, err := conn.Write(frame)
 	if err != nil {

@@ -68,12 +68,28 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			node.resetElectionTimer()
 
 		case 0x0005: // vote request
+			// req: [2B from][4B sender's term][4B lastLogIndex][4B lastLogTerm]
 			sender, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
-			ok := node.Vote(sender)
+			term, err := readInt32(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			lastLogIndex, err := readInt32(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			lastLogTerm, err := readInt32(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			ok := node.Vote(sender, term, lastLogIndex, lastLogTerm)
 			if ok {
 				responseSuccess(conn) // "you got my vote"
 			} else {

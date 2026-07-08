@@ -30,7 +30,7 @@ type Node struct {
 	nextIndex   map[int16]int32
 	matchIndex  map[int16]int32
 
-	log *log
+	broker *Broker
 
 	mu sync.Mutex
 }
@@ -62,8 +62,8 @@ func NewNode(port int16) *Node {
 		os.MkdirAll(fmt.Sprintf("data/%d/log", port), 0755)
 	}
 
-	node.log = NewLog(node.port)
-	node.loadEntriesFromDisk()
+	node.broker = NewBroker()
+	// node.loadEntriesFromDisk()
 
 	for _, port := range ports {
 		if port == node.port {

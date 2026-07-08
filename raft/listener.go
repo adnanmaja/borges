@@ -79,12 +79,27 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			} else {
 				responseFail(conn) // "who do you think you are"
 			}
-		case 0x0006: // log entry, [2B from (irrelevant)][4B payload length][payload]
+		case 0x0006: // log entry from client
+			// incoming: [2B from (irrelevant)][4B topic len][topic][4B payload length][payload]
 			_, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
+
+			topicLen, err := parse4Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			topicBuf := make([]byte, topicLen)
+			err = readFull(conn, topicBuf)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			topic := string(topicBuf)
 
 			entryLen, err := parse4Bytes(conn)
 			if err != nil {
@@ -98,7 +113,9 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			ok := node.WriteLog(entry)
+			log := node.broker.GetOrCreateLog(topic, node.port)
+
+			ok := log.WriteLog(entry, node)
 			if ok {
 				responseSuccess(conn)
 			} else {
@@ -106,7 +123,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 		case 0x0007: // leader's request to append entries.
-			// [2B leader's port (irrelevant for now)][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][2B entryNum] + loop([8B timestamp][4B entryLen][entry])
+			// [2B leader's port (irrelevant for now)][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][4B topic len][topic][2B entryNum] + loop([8B timestamp][4B entryLen][entry])
 			_, err := parse2Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -137,13 +154,25 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			entryNum, err := parse2Bytes(conn)
+			topicLen, err := parse4Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			fmt.Println("[DEBUG] entryNum:", entryNum)
+			topicBuf := make([]byte, topicLen)
+			err = readFull(conn, topicBuf)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			topic := string(topicBuf)
+
+			entryNum, err := parse2Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
 
 			var entries []Entry
 			for range entryNum {
@@ -172,7 +201,8 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				})
 			}
 
-			ok := node.AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit, entries)
+			log := node.broker.GetOrCreateLog(topic, node.port)
+			ok := log.AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit, entries, node)
 			if ok {
 				responseSuccess(conn)
 			} else {
@@ -180,7 +210,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 		case 0x0008: // client's consume request
-			// req: [2B from (irrelevant)][8B relative offset]
+			// req: [2B from (irrelevant)][4B len topic][topic][8B relative offset]
 			// res: [2B fail/success][8B timestamp][4B payload length][payload]
 			_, err := parse2Bytes(conn)
 			if err != nil {
@@ -188,13 +218,28 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
+			topicLen, err := parse4Bytes(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			topicBuf := make([]byte, topicLen)
+			err = readFull(conn, topicBuf)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+			topic := string(topicBuf)
+
 			offsetTarget, err := parse8Bytes(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			entry, err := node.readLog(int64(offsetTarget))
+			log := node.broker.GetOrCreateLog(topic, node.port)
+			entry, err := log.readLog(int64(offsetTarget), node)
 			if err != nil {
 				fmt.Println("error:", err)
 				responseFail(conn)

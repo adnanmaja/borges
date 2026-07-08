@@ -14,8 +14,8 @@ type Index struct {
 	mu             sync.RWMutex
 }
 
-func NewIndex(port int16, offset int64, logSize int64) *Index {
-	filePath := fmt.Sprintf("data/%d/log/%020d.index", port, offset)
+func NewIndex(port int16, offset int64, logSize int64, topic string) *Index {
+	filePath := fmt.Sprintf("data/%d/log/%s/%020d.index", port, topic, offset)
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {

@@ -14,13 +14,14 @@ import (
 	"time"
 )
 
-type log struct {
+type Log struct {
 	segments       []*Segment
 	mu             sync.Mutex
 	activeSegment  *Segment
 	activeIndex    *Index
 	segmentOffsets []int64
 	nextOffset     int64
+	topic          string
 }
 
 type appendLogMsg struct {
@@ -30,14 +31,17 @@ type appendLogMsg struct {
 	prevLogTerm  int32
 	commitIndex  int32
 	entries      []Entry
+	topic        string
 }
 
-func NewLog(port int16) *log {
-	l := &log{}
+func NewLog(port int16, topic string) *Log {
+	l := &Log{
+		topic: topic,
+	}
 
 	var savedOffsets []int64
 
-	files, _ := os.ReadDir(fmt.Sprintf("logs/%d", port))
+	files, _ := os.ReadDir(fmt.Sprintf("data/%d/%s/", port, topic))
 	for _, file := range files {
 		if !file.IsDir() && filepath.Ext(file.Name()) == ".log" {
 			fileName := strings.TrimSuffix(file.Name(), ".log")
@@ -56,8 +60,8 @@ func NewLog(port int16) *log {
 
 	latestOffset := l.segmentOffsets[len(l.segmentOffsets)-1]
 
-	l.activeSegment = NewSegment(port, latestOffset)
-	l.activeIndex = NewIndex(port, latestOffset, l.activeSegment.currentSize)
+	l.activeSegment = NewSegment(port, latestOffset, topic)
+	l.activeIndex = NewIndex(port, latestOffset, l.activeSegment.currentSize, topic)
 
 	entryCount, err := l.activeIndex.EntryCount()
 	if err == nil {
@@ -80,48 +84,46 @@ func spawnInitFile(port int16) {
 	}
 }
 
-func (node *Node) loadEntriesFromDisk() {
-	l := node.log
-	l.mu.Lock()
-	offsets := l.segmentOffsets
-	l.mu.Unlock()
+// func (node *Node) loadEntriesFromDisk() {
+// 	l := node.log
+// 	l.mu.Lock()
+// 	offsets := l.segmentOffsets
+// 	l.mu.Unlock()
 
-	for _, baseOffset := range offsets {
-		logPath := fmt.Sprintf("logs/%d/%020d.log", node.port, baseOffset)
-		logFile, err := os.Open(logPath)
-		if err != nil {
-			continue
-		}
+// 	for _, baseOffset := range offsets {
+// 		logPath := fmt.Sprintf("logs/%d/%020d.log", node.port, baseOffset)
+// 		logFile, err := os.Open(logPath)
+// 		if err != nil {
+// 			continue
+// 		}
 
-		for {
-			header := make([]byte, 12)
-			_, err := logFile.Read(header)
-			if err != nil {
-				break
-			}
-			timestamp := int64(binary.BigEndian.Uint64(header[0:8]))
-			payloadLen := binary.BigEndian.Uint32(header[8:12])
+// 		for {
+// 			header := make([]byte, 12)
+// 			_, err := logFile.Read(header)
+// 			if err != nil {
+// 				break
+// 			}
+// 			timestamp := int64(binary.BigEndian.Uint64(header[0:8]))
+// 			payloadLen := binary.BigEndian.Uint32(header[8:12])
 
-			payload := make([]byte, payloadLen)
-			_, err = logFile.Read(payload)
-			if err != nil {
-				break
-			}
+// 			payload := make([]byte, payloadLen)
+// 			_, err = logFile.Read(payload)
+// 			if err != nil {
+// 				break
+// 			}
 
-			node.logs = append(node.logs, Entry{
-				timestamp: timestamp,
-				payload:   string(payload),
-				term:      0,
-			})
-		}
+// 			node.logs = append(node.logs, Entry{
+// 				timestamp: timestamp,
+// 				payload:   string(payload),
+// 				term:      0,
+// 			})
+// 		}
 
-		logFile.Close()
-	}
-}
+// 		logFile.Close()
+// 	}
+// }
 
-func (node *Node) prepareSegment(size int64) (*Segment, int64) {
-	l := node.log
-
+func (l *Log) prepareSegment(size int64, port int16) (*Segment, int64) {
 	if (l.activeSegment.currentSize + size) > l.activeSegment.maxSize {
 		l.activeSegment.file.Close()
 		if l.activeIndex != nil {
@@ -130,8 +132,8 @@ func (node *Node) prepareSegment(size int64) (*Segment, int64) {
 		l.segments = append(l.segments, l.activeSegment)
 
 		l.segmentOffsets = append(l.segmentOffsets, l.nextOffset)
-		l.activeSegment = NewSegment(node.port, l.segmentOffsets[len(l.segmentOffsets)-1])
-		l.activeIndex = NewIndex(node.port, l.segmentOffsets[len(l.segmentOffsets)-1], 0)
+		l.activeSegment = NewSegment(port, l.segmentOffsets[len(l.segmentOffsets)-1], l.topic)
+		l.activeIndex = NewIndex(port, l.segmentOffsets[len(l.segmentOffsets)-1], 0, l.topic)
 	}
 
 	writeOffset := l.activeSegment.currentSize
@@ -140,9 +142,9 @@ func (node *Node) prepareSegment(size int64) (*Segment, int64) {
 	return l.activeSegment, writeOffset
 }
 
-func (node *Node) WriteLog(entry []byte) bool {
+func (l *Log) WriteLog(entry []byte, node *Node) bool {
 	node.logs = append(node.logs, Entry{timestamp: time.Now().UnixMilli(), payload: string(entry), term: node.currentTerm})
-	node.writeToDisk(node.logs[len(node.logs)-1])
+	l.writeToDisk(node.logs[len(node.logs)-1], node)
 
 	var successCount int32 = 1
 	var wg sync.WaitGroup
@@ -171,6 +173,7 @@ func (node *Node) WriteLog(entry []byte) bool {
 					prevLogTerm:  node.logs[node.nextIndex[p]-1].term,
 					commitIndex:  node.commitIndex,
 					entries:      node.logs[node.nextIndex[p]:],
+					topic:        l.topic,
 				}
 
 				ok, success, err := sendLog(conn, logMsg)
@@ -205,7 +208,7 @@ func (node *Node) WriteLog(entry []byte) bool {
 	return false
 }
 
-func (node *Node) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, entries []Entry) bool {
+func (l *Log) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, entries []Entry, node *Node) bool {
 	if leaderTerm < node.currentTerm {
 		return false
 	}
@@ -222,7 +225,7 @@ func (node *Node) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit in
 
 	for _, entry := range entries {
 		node.logs = append(node.logs, entry)
-		node.writeToDisk(entry)
+		l.writeToDisk(entry, node)
 		fmt.Println("[LOG] Appending the log entry:", string(entry.payload))
 	}
 
@@ -234,7 +237,8 @@ func (node *Node) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit in
 }
 
 func sendLog(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
-	frameSize := 2 + 2 + 4 + 4 + 4 + 4 + 2
+	// [0x0007][2B port][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][4B topic len][topic][2B entryCount] + loop([8B timestamp][4B entryLen][entry])
+	frameSize := 2 + 2 + 4 + 4 + 4 + 4 + 4 + len(logMsg.topic) + 2
 	frame := make([]byte, frameSize)
 	off := 0
 
@@ -250,6 +254,11 @@ func sendLog(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 	off += 4
 	binary.BigEndian.PutUint32(frame[off:], uint32(logMsg.commitIndex))
 	off += 4
+	binary.BigEndian.PutUint32(frame[off:], uint32(len(logMsg.topic)))
+	off += 4
+
+	copy(frame[off:], []byte(logMsg.topic))
+	off += len(logMsg.topic)
 
 	entriesCount := len(logMsg.entries)
 	binary.BigEndian.PutUint16(frame[off:], uint16(entriesCount))
@@ -287,7 +296,7 @@ func sendLog(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 	return false, false, nil
 }
 
-func (node *Node) writeToDisk(entry Entry) {
+func (l *Log) writeToDisk(entry Entry, node *Node) {
 	totalSize := 8 + 4 + len(entry.payload)
 	buf := make([]byte, totalSize)
 	off := 0
@@ -300,47 +309,47 @@ func (node *Node) writeToDisk(entry Entry) {
 
 	copy(buf[off:], []byte(entry.payload))
 
-	node.log.mu.Lock()
-	defer node.log.mu.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-	segment, _ := node.prepareSegment(int64(totalSize))
+	segment, _ := l.prepareSegment(int64(totalSize), node.port)
 	_, err := segment.file.Write(buf)
 	if err != nil {
 		panic("writeToDisk failed")
 	}
 
-	node.log.activeIndex.IndexWrite(node.log.nextOffset, int64(totalSize))
-	node.log.nextOffset++
+	l.activeIndex.IndexWrite(l.nextOffset, int64(totalSize))
+	l.nextOffset++
 }
 
-func (node *Node) findIndexFile(relativeOffset int64) string {
-	if len(node.log.segmentOffsets) == 0 {
+func (l *Log) findIndexFile(relativeOffset int64, port int16) string {
+	if len(l.segmentOffsets) == 0 {
 		return ""
 	}
 
-	lo, hi := 0, len(node.log.segmentOffsets)-1
+	lo, hi := 0, len(l.segmentOffsets)-1
 	for lo < hi {
 		mid := lo + (hi-lo+1)/2
-		if node.log.segmentOffsets[mid] <= relativeOffset {
+		if l.segmentOffsets[mid] <= relativeOffset {
 			lo = mid
 		} else {
 			hi = mid - 1
 		}
 	}
 
-	if node.log.segmentOffsets[lo] > relativeOffset {
+	if l.segmentOffsets[lo] > relativeOffset {
 		return ""
 	}
 
-	return fmt.Sprintf("data/%d/log/%020d.index", node.port, node.log.segmentOffsets[lo])
+	return fmt.Sprintf("data/%d/log/%020d.index", port, l.segmentOffsets[lo])
 }
 
-func (node *Node) readLog(targetOffset int64) (Entry, error) {
-	node.log.mu.Lock()
-	indexPath := node.findIndexFile(targetOffset)
+func (l *Log) readLog(targetOffset int64, node *Node) (Entry, error) {
+	l.mu.Lock()
+	indexPath := l.findIndexFile(targetOffset, node.port)
 
 	logPath := strings.TrimSuffix(indexPath, filepath.Ext(indexPath)) + ".log"
-	node.log.mu.Unlock()
+	l.mu.Unlock()
 
 	indexFile, err := os.Open(indexPath)
 	if err != nil {
@@ -352,7 +361,7 @@ func (node *Node) readLog(targetOffset int64) (Entry, error) {
 		return Entry{}, err
 	}
 
-	absOffset, err := node.log.activeIndex.offsetLookup(indexFile, targetOffset)
+	absOffset, err := l.activeIndex.offsetLookup(indexFile, targetOffset)
 	if err != nil {
 		return Entry{}, err
 	}

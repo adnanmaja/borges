@@ -15,8 +15,13 @@ type Segment struct {
 	timestamp   int64
 }
 
-func NewSegment(port int16, offset int64) *Segment {
-	filePath := fmt.Sprintf("data/%d/log/%020d.log", port, offset)
+func NewSegment(port int16, offset int64, topic string) *Segment {
+	filePath := fmt.Sprintf("data/%d/log/%s/%020d.log", port, topic, offset)
+
+	err := os.MkdirAll(fmt.Sprintf("data/%d/log/%s", port, topic), 0755)
+	if err != nil {
+		panic(fmt.Sprintf("log failed log fialed log failed: %s", err))
+	}
 
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

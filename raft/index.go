@@ -8,10 +8,10 @@ import (
 )
 
 type Index struct {
-	file           *os.File
-	path           string
-	absoluteOffset int64
-	mu             sync.RWMutex
+	file       *os.File
+	path       string
+	byteOffset int64
+	mu         sync.RWMutex
 }
 
 func NewIndex(port int16, offset int64, logSize int64, topic string) *Index {
@@ -23,19 +23,19 @@ func NewIndex(port int16, offset int64, logSize int64, topic string) *Index {
 	}
 
 	return &Index{
-		file:           file,
-		path:           filePath,
-		absoluteOffset: logSize,
+		file:       file,
+		path:       filePath,
+		byteOffset: logSize,
 	}
 }
 
-func (idx *Index) IndexWrite(relOffset, size int64) {
+func (idx *Index) WriteIndex(relOffset, size int64) {
 	buf := make([]byte, 8+8)
 	binary.BigEndian.PutUint64(buf[0:8], uint64(relOffset))
-	binary.BigEndian.PutUint64(buf[8:16], uint64(idx.absoluteOffset))
+	binary.BigEndian.PutUint64(buf[8:16], uint64(idx.byteOffset))
 
 	idx.mu.Lock()
-	idx.absoluteOffset += size
+	idx.byteOffset += size
 	_, err := idx.file.Write(buf)
 	idx.mu.Unlock()
 	if err != nil {
@@ -51,7 +51,7 @@ func (idx *Index) EntryCount() (int64, error) {
 	return stat.Size() / 16, nil
 }
 
-func (idx *Index) offsetLookup(indexFile *os.File, offsetTarget int64) (uint64, error) {
+func (idx *Index) lookupOffset(indexFile *os.File, offsetTarget int64) (uint64, error) {
 	fileInfo, err := indexFile.Stat()
 	if err != nil {
 		return 0, err

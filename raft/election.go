@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func (node *Node) ElectItself() {
+func (node *Node) StartElection() {
 	if node.role == "Candidate" {
 
 		fmt.Printf("[ELECTION] i wanna be the leader! \n")
@@ -34,7 +34,7 @@ func (node *Node) ElectItself() {
 					fmt.Println("[ELECTION] Everybody please vote for me")
 					if granted {
 						conn.Close()
-						node.RecapVote()
+						node.CountVote()
 
 					}
 				}
@@ -54,7 +54,7 @@ func (node *Node) Vote(target int16) bool {
 	}
 }
 
-func (node *Node) RecapVote() {
+func (node *Node) CountVote() {
 	node.voteCount++
 	fmt.Println("[ELECTION] Thank you!!")
 
@@ -68,7 +68,7 @@ func (node *Node) RecapVote() {
 				continue
 			} else {
 				node.Heartbeat()
-				node.nextIndex[port] = int32(len(node.logs))
+				node.nextIndex[port] = int32(len(node.entries))
 			}
 		}
 	}

@@ -52,7 +52,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 		switch opcode {
 		case 0x0004: // heartbeat
 			//[2B from][10B payload]
-			from, err := parse2Bytes(conn)
+			from, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -68,7 +68,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			node.resetElectionTimer()
 
 		case 0x0005: // vote request
-			sender, err := parse2Bytes(conn)
+			sender, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -81,13 +81,13 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 		case 0x0006: // log entry from client
 			// incoming: [2B from (irrelevant)][4B topic len][topic][4B payload length][payload]
-			_, err := parse2Bytes(conn)
+			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			topicLen, err := parse4Bytes(conn)
+			topicLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -101,7 +101,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 			topic := string(topicBuf)
 
-			entryLen, err := parse4Bytes(conn)
+			entryLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -115,7 +115,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 			log := node.broker.GetOrCreateLog(topic, node.port)
 
-			ok := log.WriteLog(entry, node)
+			ok := log.Write(entry, node)
 			if ok {
 				responseSuccess(conn)
 			} else {
@@ -124,37 +124,37 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 		case 0x0007: // leader's request to append entries.
 			// [2B leader's port (irrelevant for now)][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][4B topic len][topic][2B entryNum] + loop([8B timestamp][4B entryLen][entry])
-			_, err := parse2Bytes(conn)
+			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			leaderTerm, err := parse4Bytes(conn)
+			leaderTerm, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			prevLogIdx, err := parse4Bytes(conn)
+			prevLogIdx, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			prevLogTerm, err := parse4Bytes(conn)
+			prevLogTerm, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			leaderCommit, err := parse4Bytes(conn)
+			leaderCommit, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			topicLen, err := parse4Bytes(conn)
+			topicLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -168,7 +168,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 			topic := string(topicBuf)
 
-			entryNum, err := parse2Bytes(conn)
+			entryNum, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -176,13 +176,13 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 			var entries []Entry
 			for range entryNum {
-				timestamp, err := parse8Bytes(conn)
+				timestamp, err := readInt64(conn)
 				if err != nil {
 					fmt.Println("error:", err)
 					break
 				}
 
-				payloadLen, err := parse4Bytes(conn)
+				payloadLen, err := readInt32(conn)
 				if err != nil {
 					fmt.Println("error:", err)
 					break
@@ -202,7 +202,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 			log := node.broker.GetOrCreateLog(topic, node.port)
-			ok := log.AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit, entries, node)
+			ok := log.Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit, entries, node)
 			if ok {
 				responseSuccess(conn)
 			} else {
@@ -210,15 +210,15 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 		case 0x0008: // client's consume request
-			// req: [2B from (irrelevant)][4B len topic][topic][8B relative offset]
-			// res: [2B fail/success][8B timestamp][4B payload length][payload]
-			_, err := parse2Bytes(conn)
+			// req: [2B from (irrelevant)][4B len topic][topic][8B target offset start][4B size limit]
+			// res: [2B fail/success][4B entry count] + loop([8B timestamp][4B payload length][payload])
+			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			topicLen, err := parse4Bytes(conn)
+			topicLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
@@ -232,32 +232,46 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 			topic := string(topicBuf)
 
-			offsetTarget, err := parse8Bytes(conn)
+			offsetTarget, err := readInt64(conn)
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			sizeLimit, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
 			log := node.broker.GetOrCreateLog(topic, node.port)
-			entry, err := log.readLog(int64(offsetTarget), node)
+			entries, err := log.Read(int64(offsetTarget), node, sizeLimit)
 			if err != nil {
 				fmt.Println("error:", err)
 				responseFail(conn)
 				break
 			}
 
-			headerBuf := make([]byte, 14)
-			binary.BigEndian.PutUint16(headerBuf[0:2], 0x0001) // success
-			binary.BigEndian.PutUint64(headerBuf[2:10], uint64(entry.timestamp))
-			binary.BigEndian.PutUint32(headerBuf[10:14], uint32(len(entry.payload)))
-			conn.Write(headerBuf)
-			conn.Write([]byte(entry.payload))
+			headerFrame := make([]byte, 6)
+			binary.BigEndian.PutUint16(headerFrame[0:2], 0x0001) // success
+			binary.BigEndian.PutUint32(headerFrame[2:6], uint32(len(entries)))
+			conn.Write(headerFrame)
+
+			for _, entry := range entries {
+				fmt.Printf("[DEBUG] timestamp:%d payload:%s\n", entry.timestamp, entry.payload)
+				headerBuf := make([]byte, 12)
+				binary.BigEndian.PutUint64(headerBuf[0:8], uint64(entry.timestamp))
+				binary.BigEndian.PutUint32(headerBuf[8:12], uint32(len(entry.payload)))
+				fmt.Println("[DEBUG] headerBuf:", headerBuf)
+				conn.Write(headerBuf)
+				conn.Write([]byte(entry.payload))
+			}
 
 		}
 	}
 }
 
-func parse2Bytes(conn net.Conn) (int16, error) {
+func readInt16(conn net.Conn) (int16, error) {
 	buf := make([]byte, 2)
 	if err := readFull(conn, buf); err != nil {
 		return 0, err
@@ -267,7 +281,7 @@ func parse2Bytes(conn net.Conn) (int16, error) {
 	return int16(message), nil
 }
 
-func parse4Bytes(conn net.Conn) (int32, error) {
+func readInt32(conn net.Conn) (int32, error) {
 	buf := make([]byte, 4)
 	if err := readFull(conn, buf); err != nil {
 		return 0, err
@@ -276,7 +290,7 @@ func parse4Bytes(conn net.Conn) (int32, error) {
 	return int32(binary.BigEndian.Uint32(buf)), nil
 }
 
-func parse8Bytes(conn net.Conn) (int64, error) {
+func readInt64(conn net.Conn) (int64, error) {
 	buf := make([]byte, 8)
 	if err := readFull(conn, buf); err != nil {
 		return 0, err

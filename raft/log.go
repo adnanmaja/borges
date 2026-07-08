@@ -51,7 +51,7 @@ func NewLog(port int16, topic string) *Log {
 	}
 
 	if len(savedOffsets) == 0 {
-		spawnInitFile(port)
+		createInitFile(port)
 		savedOffsets = append(savedOffsets, 0)
 	}
 
@@ -71,7 +71,7 @@ func NewLog(port int16, topic string) *Log {
 	return l
 }
 
-func spawnInitFile(port int16) {
+func createInitFile(port int16) {
 	path := fmt.Sprintf("logs/%d/%020d.log", port, 0)
 	f, _ := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
 	if f != nil {
@@ -142,9 +142,9 @@ func (l *Log) prepareSegment(size int64, port int16) (*Segment, int64) {
 	return l.activeSegment, writeOffset
 }
 
-func (l *Log) WriteLog(entry []byte, node *Node) bool {
-	node.logs = append(node.logs, Entry{timestamp: time.Now().UnixMilli(), payload: string(entry), term: node.currentTerm})
-	l.writeToDisk(node.logs[len(node.logs)-1], node)
+func (l *Log) Write(entry []byte, node *Node) bool {
+	node.entries = append(node.entries, Entry{timestamp: time.Now().UnixMilli(), payload: string(entry), term: node.currentTerm})
+	l.writeToDisk(node.entries[len(node.entries)-1], node)
 
 	var successCount int32 = 1
 	var wg sync.WaitGroup
@@ -170,13 +170,13 @@ func (l *Log) WriteLog(entry []byte, node *Node) bool {
 					leaderTerm:   node.currentTerm,
 					leaderPort:   node.port,
 					prevLogIndex: node.nextIndex[p] - 1,
-					prevLogTerm:  node.logs[node.nextIndex[p]-1].term,
+					prevLogTerm:  node.entries[node.nextIndex[p]-1].term,
 					commitIndex:  node.commitIndex,
-					entries:      node.logs[node.nextIndex[p]:],
+					entries:      node.entries[node.nextIndex[p]:],
 					topic:        l.topic,
 				}
 
-				ok, success, err := sendLog(conn, logMsg)
+				ok, success, err := sendAppendEntries(conn, logMsg)
 				fmt.Println("[LOG] Sending append log entries")
 
 				if ok && success {
@@ -201,42 +201,42 @@ func (l *Log) WriteLog(entry []byte, node *Node) bool {
 		}
 		wg.Wait()
 		if successCount > int32(len(ports)/2) {
-			node.commitIndex = int32(len(node.logs) - 1)
+			node.commitIndex = int32(len(node.entries) - 1)
 			return true
 		}
 	}
 	return false
 }
 
-func (l *Log) AppendLog(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, entries []Entry, node *Node) bool {
+func (l *Log) Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, entries []Entry, node *Node) bool {
 	if leaderTerm < node.currentTerm {
 		return false
 	}
 
-	if prevLogIdx >= int32(len(node.logs)) {
+	if prevLogIdx >= int32(len(node.entries)) {
 		return false
 	}
 
-	if node.logs[prevLogIdx].term != prevLogTerm {
+	if node.entries[prevLogIdx].term != prevLogTerm {
 		return false
 	}
 
-	node.logs = node.logs[:prevLogIdx+1]
+	node.entries = node.entries[:prevLogIdx+1]
 
 	for _, entry := range entries {
-		node.logs = append(node.logs, entry)
+		node.entries = append(node.entries, entry)
 		l.writeToDisk(entry, node)
 		fmt.Println("[LOG] Appending the log entry:", string(entry.payload))
 	}
 
 	if leaderCommit > node.commitIndex {
-		node.commitIndex = min(leaderCommit, int32(len(node.logs)-1))
+		node.commitIndex = min(leaderCommit, int32(len(node.entries)-1))
 	}
 
 	return true
 }
 
-func sendLog(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
+func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 	// [0x0007][2B port][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][4B topic len][topic][2B entryCount] + loop([8B timestamp][4B entryLen][entry])
 	frameSize := 2 + 2 + 4 + 4 + 4 + 4 + 4 + len(logMsg.topic) + 2
 	frame := make([]byte, frameSize)
@@ -318,7 +318,7 @@ func (l *Log) writeToDisk(entry Entry, node *Node) {
 		panic("writeToDisk failed")
 	}
 
-	l.activeIndex.IndexWrite(l.nextOffset, int64(totalSize))
+	l.activeIndex.WriteIndex(l.nextOffset, int64(totalSize))
 	l.nextOffset++
 }
 
@@ -341,51 +341,62 @@ func (l *Log) findIndexFile(relativeOffset int64, port int16) string {
 		return ""
 	}
 
-	return fmt.Sprintf("data/%d/log/%020d.index", port, l.segmentOffsets[lo])
+	return fmt.Sprintf("data/%d/log/%s/%020d.index", port, l.topic, l.segmentOffsets[lo])
 }
 
-func (l *Log) readLog(targetOffset int64, node *Node) (Entry, error) {
+func (l *Log) Read(startOffset int64, node *Node, sizeLimit int32) ([]Entry, error) {
 	l.mu.Lock()
-	indexPath := l.findIndexFile(targetOffset, node.port)
+	indexPath := l.findIndexFile(startOffset, node.port)
 
 	logPath := strings.TrimSuffix(indexPath, filepath.Ext(indexPath)) + ".log"
 	l.mu.Unlock()
 
 	indexFile, err := os.Open(indexPath)
 	if err != nil {
-		return Entry{}, err
+		return nil, err
 	}
+	defer indexFile.Close()
 
 	logFile, err := os.Open(logPath)
 	if err != nil {
-		return Entry{}, err
+		return nil, err
 	}
+	defer logFile.Close()
 
-	absOffset, err := l.activeIndex.offsetLookup(indexFile, targetOffset)
-	if err != nil {
-		return Entry{}, err
+	var entries []Entry
+	var sizeCount int = 0
+
+	for sizeCount < int(sizeLimit) {
+		absOffset, err := l.activeIndex.lookupOffset(indexFile, startOffset)
+		if err != nil {
+			break
+		}
+
+		headerBuf := make([]byte, 12)
+		_, err = logFile.ReadAt(headerBuf, int64(absOffset))
+		if err != nil {
+			break
+		}
+
+		timestamp := binary.BigEndian.Uint64(headerBuf[0:8])
+		payloadLen := binary.BigEndian.Uint32(headerBuf[8:12])
+
+		payloadBuf := make([]byte, payloadLen)
+
+		_, err = logFile.ReadAt(payloadBuf, int64(absOffset)+12)
+		if err != nil {
+			break
+		}
+
+		sizeCount += len(headerBuf) + len(payloadBuf)
+
+		entries = append(entries, Entry{
+			term:      node.currentTerm,
+			timestamp: int64(timestamp),
+			payload:   string(payloadBuf),
+		})
+
+		startOffset++
 	}
-
-	// each log on disk: [8B timestamp][4B payload len][payload]
-	headerBuf := make([]byte, 12)
-	_, err = logFile.ReadAt(headerBuf, int64(absOffset))
-	if err != nil {
-		return Entry{}, err
-	}
-
-	timestamp := binary.BigEndian.Uint64(headerBuf[0:8])
-	payloadLen := binary.BigEndian.Uint32(headerBuf[8:12])
-
-	payloadBuf := make([]byte, payloadLen)
-
-	_, err = logFile.ReadAt(payloadBuf, int64(absOffset)+12)
-	if err != nil {
-		return Entry{}, err
-	}
-
-	return Entry{
-		term:      node.currentTerm,
-		timestamp: int64(timestamp),
-		payload:   string(payloadBuf),
-	}, nil
+	return entries, nil
 }

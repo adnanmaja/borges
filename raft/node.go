@@ -21,11 +21,11 @@ type Node struct {
 	votedFor    int16
 	voteCount   int32
 
-	heartbeatTick <-chan time.Time
+	heartbeat     <-chan time.Time
 	electionTimer *time.Timer
 	lastHeartbeat time.Time
 
-	logs        []Entry
+	entries     []Entry
 	commitIndex int32
 	nextIndex   map[int16]int32
 	matchIndex  map[int16]int32
@@ -45,11 +45,11 @@ func NewNode(port int16) *Node {
 		port:          port,
 		role:          "Candidate",
 		electionTimer: electionTicker,
-		heartbeatTick: heartbeatTicker.C,
+		heartbeat:     heartbeatTicker.C,
 		voteCount:     0,
 		votedFor:      0,
 		lastHeartbeat: time.Now(),
-		logs: []Entry{
+		entries: []Entry{
 			0: {payload: "", term: 0},
 		},
 		commitIndex: 0,
@@ -84,7 +84,7 @@ func (node *Node) startLoop() {
 
 	for {
 		select {
-		case <-node.heartbeatTick:
+		case <-node.heartbeat:
 			if node.role == "Leader" {
 				node.Heartbeat()
 			} else {
@@ -96,7 +96,7 @@ func (node *Node) startLoop() {
 			} else {
 				fmt.Println("[DEBUG] electing myself")
 				node.role = "Candidate"
-				node.ElectItself()
+				node.StartElection()
 			}
 		}
 	}

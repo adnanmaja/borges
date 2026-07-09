@@ -20,6 +20,8 @@ func (node *Node) StartElection() {
 		} else {
 			node.votedFor = node.port
 
+			node.saveStates()
+
 			for _, port := range ports {
 				if port == node.port {
 					continue
@@ -45,13 +47,8 @@ func (node *Node) StartElection() {
 }
 
 func (node *Node) Vote(target int16, term, lastLogIndex, lastLogTerm int32) bool {
-	var voteGranted bool = false
-	if node.votedFor != 0 {
-		return voteGranted
-	}
-
 	if term < node.currentTerm {
-		return voteGranted
+		return false
 	}
 
 	if term > node.currentTerm {
@@ -59,16 +56,21 @@ func (node *Node) Vote(target int16, term, lastLogIndex, lastLogTerm int32) bool
 		node.votedFor = 0
 	}
 
+	if node.votedFor != 0 && node.votedFor != target {
+		return false
+	}
+
 	currentLastLogTerm := node.entries[len(node.entries)-1].term
 	currentLastLogIndex := len(node.entries) - 1
 
 	if lastLogTerm > currentLastLogTerm || (lastLogTerm == currentLastLogTerm && lastLogIndex >= int32(currentLastLogIndex)) {
-		voteGranted = true
+		node.votedFor = target
+		fmt.Println("[ELECTION] I voted for", node.votedFor)
+		node.saveStates()
+		return true
 	}
 
-	node.votedFor = target
-	fmt.Println("[ELECTION] I voted for", node.votedFor)
-	return true
+	return false
 }
 
 func (node *Node) CountVote() {

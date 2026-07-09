@@ -95,8 +95,8 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			} else {
 				responseFail(conn) // "who do you think you are"
 			}
-		case 0x0006: // log entry from client
-			// incoming: [2B from (irrelevant)][4B topic len][topic][4B payload length][payload]
+		case 0x0006: // log entry from client (produce)
+			// incoming: [2B from (irrelevant)][4B topic len][topic][4B entries count] + loop([4B payload length][payload])
 			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -109,21 +109,38 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			entryLen, err := readInt32(conn)
+			fmt.Println("[DEBUG] topic:", topic)
+
+			entriesCount, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			entry := make([]byte, entryLen)
-			if err := readFull(conn, entry); err != nil {
-				fmt.Println("error:", err)
+			maxEntryCount := 100
+			if entriesCount > int32(maxEntryCount) {
+				responseFail(conn)
+				fmt.Println("[DEBUG] too mcuh entries")
 				break
 			}
 
+			var ok bool
 			log := node.broker.GetOrCreateLog(topic, node.port)
+			for range entriesCount {
+				payloadLen, err := readInt32(conn)
+				if err != nil {
+					fmt.Println("error:", err)
+					break
+				}
 
-			ok := log.Write(entry, node)
+				payload := make([]byte, payloadLen)
+				if err := readFull(conn, payload); err != nil {
+					fmt.Println("error:", err)
+					break
+				}
+				ok = log.Write(payload, node)
+			}
+
 			if ok {
 				responseSuccess(conn)
 			} else {

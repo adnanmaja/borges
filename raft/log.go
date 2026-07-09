@@ -173,6 +173,12 @@ func (l *Log) Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, en
 		return false
 	}
 
+	if leaderTerm > node.currentTerm {
+		node.currentTerm = leaderTerm
+		node.votedFor = 0
+		node.saveStates()
+	}
+
 	if prevLogIdx >= int32(len(node.entries)) {
 		return false
 	}

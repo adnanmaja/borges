@@ -19,7 +19,7 @@ func (node *Node) Heartbeat() {
 				continue
 			}
 			sendHeartbeat(node.port, conn)
-			defer conn.Close()
+			conn.Close()
 		}
 	}
 }

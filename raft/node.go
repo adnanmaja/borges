@@ -1,8 +1,9 @@
 package main
 
 import (
-	"encoding/json"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"sync"
@@ -106,26 +107,15 @@ func (node *Node) startLoop() {
 }
 
 func (node *Node) saveStates() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	path := fmt.Sprintf("data/%d/states.bin", node.port)
 
-	for range ticker.C {
-		node.mu.Lock()
-		data, err := json.Marshal(struct {
-			CurrentTerm int32 `json:"currentTerm"`
-			VotedFor    int16 `json:"votedFor"`
-		}{
-			CurrentTerm: node.currentTerm,
-			VotedFor:    node.votedFor,
-		})
-		node.mu.Unlock()
-
-		path := fmt.Sprintf("data/%d/states.json", node.port)
-		err = os.WriteFile(path, data, 0644)
-		if err != nil {
-			fmt.Println("error writing file:", err)
-			return
-		}
+	buf := make([]byte, 6)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(node.currentTerm))
+	binary.BigEndian.PutUint16(buf[4:6], uint16(node.votedFor))
+	err := os.WriteFile(path, buf, 0644)
+	if err != nil {
+		fmt.Println("error writing file:", err)
+		return
 	}
 }
 
@@ -133,7 +123,7 @@ func (node *Node) loadStates() {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 
-	path := fmt.Sprintf("data/%d/states.json", node.port)
+	path := fmt.Sprintf("data/%d/states.bin", node.port)
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		node.currentTerm = 0
@@ -141,23 +131,23 @@ func (node *Node) loadStates() {
 		return
 	}
 
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		fmt.Println("error reading file:", err)
 		return
 	}
 
-	var state struct {
-		CurrentTerm int32 `json:"currentTerm"`
-		VotedFor    int16 `json:"votedFor"`
-	}
+	buf := make([]byte, 6)
 
-	err = json.Unmarshal(data, &state)
+	_, err = io.ReadFull(file, buf)
 	if err != nil {
-		fmt.Println("error unmarshaling json:", err)
+		fmt.Println("error reading file:", err)
 		return
 	}
 
-	node.currentTerm = state.CurrentTerm
-	node.votedFor = state.VotedFor
+	currentTerm := binary.BigEndian.Uint32(buf[0:4])
+	votedFor := binary.BigEndian.Uint16(buf[4:6])
+
+	node.currentTerm = int32(currentTerm)
+	node.votedFor = int16(votedFor)
 }

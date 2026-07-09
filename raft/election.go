@@ -13,37 +13,46 @@ func (node *Node) StartElection() {
 
 		fmt.Printf("[ELECTION] i wanna be the leader! \n")
 
-		node.currentTerm++
-
-		if node.votedFor != node.port && node.role == "Follower" {
+		if time.Since(node.lastHeartbeat) < 8*time.Second {
+			fmt.Println("[ELECTION] leader is alive, stepping down")
 			node.role = "Follower"
-		} else {
-			node.votedFor = node.port
+			randSec := 8 + rand.Intn(11)
+			node.electionTimer.Reset(time.Duration(randSec) * time.Second)
+			return
+		}
 
-			node.saveStates()
+		node.currentTerm++
+		node.voteCount = 0
+		node.votedFor = node.port
 
-			for _, port := range ports {
-				if port == node.port {
-					continue
-				}
-				lastLogIndex := len(node.entries) - 1
-				lastLogTerm := node.entries[lastLogIndex].term
-				err := node.pool.Send(port, 5*time.Second, func(conn net.Conn) error {
-					fmt.Println("[ELECTION] Everybody please vote for me")
-					granted, err := sendVoteRequest(conn, node.port, node.currentTerm, int32(lastLogIndex), lastLogTerm)
-					if err != nil {
-						return err
-					}
-					if granted {
-						node.CountVote()
-					}
-					return nil
-				})
-				if err != nil {
-					fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
-				}
+		node.saveStates()
+
+		for _, port := range ports {
+			if port == node.port {
+				continue
+			}
+			lastLogIndex := len(node.entries) - 1
+			lastLogTerm := node.entries[lastLogIndex].term
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 5*time.Second)
+			if err != nil {
+				fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
+				continue
+			}
+			conn.SetDeadline(time.Now().Add(5 * time.Second))
+			fmt.Println("[ELECTION] Everybody please vote for me")
+			granted, err := sendVoteRequest(conn, node.port, node.currentTerm, int32(lastLogIndex), lastLogTerm)
+			conn.Close()
+			if err != nil {
+				fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
+				continue
+			}
+			if granted {
+				node.CountVote()
 			}
 		}
+
+		randSec := 8 + rand.Intn(11)
+		node.electionTimer.Reset(time.Duration(randSec) * time.Second)
 	}
 }
 
@@ -55,6 +64,7 @@ func (node *Node) Vote(target int16, term, lastLogIndex, lastLogTerm int32) bool
 	if term > node.currentTerm {
 		node.currentTerm = term
 		node.votedFor = 0
+		node.role = "Follower"
 	}
 
 	if node.votedFor != 0 && node.votedFor != target {
@@ -78,7 +88,7 @@ func (node *Node) CountVote() {
 	node.voteCount++
 	fmt.Println("[ELECTION] Thank you!!")
 
-	if node.voteCount >= int32((len(ports))/2) {
+	if node.voteCount > int32((len(ports))/2) {
 		node.role = "Leader"
 		fmt.Println("[ELECTION] Im the leader now")
 
@@ -93,7 +103,11 @@ func (node *Node) CountVote() {
 	}
 }
 
-func (node *Node) resetElectionTimer() {
+func (node *Node) resetElectionTimer(leaderTerm int32) {
+	if leaderTerm > node.currentTerm {
+		node.currentTerm = leaderTerm
+		node.votedFor = 0
+	}
 	node.role = "Follower"
 	node.lastHeartbeat = time.Now()
 	node.electionTimer.Stop()

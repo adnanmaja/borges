@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -34,8 +35,6 @@ type Node struct {
 	matchIndex  map[int16]int32
 
 	broker *Broker
-	pool   *PeerPool
-
 	listener        net.Listener
 	heartbeatTicker *time.Ticker
 	stopCh          chan struct{}
@@ -51,7 +50,7 @@ func NewNode(port int16) *Node {
 
 	node := &Node{
 		port:            port,
-		role:            "Candidate",
+		role:            "Follower",
 		electionTimer:   electionTicker,
 		heartbeat:       heartbeatTicker.C,
 		heartbeatTicker: heartbeatTicker,
@@ -72,7 +71,6 @@ func NewNode(port int16) *Node {
 	}
 
 	node.broker = NewBroker()
-	node.pool = NewPeerPool()
 	node.loadStates()
 	go node.broker.saveSnapshot(node.port, node.stopCh)
 	go node.saveStates()
@@ -110,28 +108,29 @@ func (node *Node) startLoop() {
 				node.StartElection()
 			}
 		case <-node.stopCh:
-			fmt.Println("[SHUTDOWN] event loop exiting")
+			fmt.Println("[DEBUG] event loop exiting")
 			return
 		}
 	}
 }
 
 func (node *Node) Shutdown() {
-	fmt.Println("\n[SHUTDOWN] initiating graceful shutdown...")
+	fmt.Println("\n[DEBUG] saving state...")
 
-	close(node.stopCh)
+	node.mu.Lock()
+	node.saveStates()
+	node.mu.Unlock()
 
-	if node.listener != nil {
-		node.listener.Close()
+	node.broker.mu.Lock()
+	data, err := json.Marshal(node.broker.offsets)
+	node.broker.mu.Unlock()
+	if err == nil {
+		snapshotPath := fmt.Sprintf("data/%d/offsets_snapshot.json", node.port)
+		os.WriteFile(snapshotPath, data, 0644)
 	}
 
-	node.pool.Close()
-	node.broker.Close()
-
-	node.electionTimer.Stop()
-	node.heartbeatTicker.Stop()
-
-	fmt.Println("[SHUTDOWN] goodbye!")
+	fmt.Println("[DEBUG] dead")
+	os.Exit(0)
 }
 
 func (node *Node) saveStates() {

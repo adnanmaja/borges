@@ -171,35 +171,36 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 					topic:        l.topic,
 				}
 
-				err := node.pool.Send(p, 5*time.Second, func(conn net.Conn) error {
-					fmt.Println("[LOG] Sending append log entries")
-					ok, success, err := sendAppendEntries(conn, logMsg)
-					if err != nil {
-						return err
-					}
-
-					if ok && success {
-						atomic.AddInt32(&successCount, 1)
-
-						node.mu.Lock()
-						node.matchIndex[p] = logMsg.prevLogIndex + int32(len(logMsg.entries))
-						node.nextIndex[p] = node.matchIndex[p] + 1
-						node.mu.Unlock()
-
-					} else if ok && !success {
-						node.mu.Lock()
-						node.nextIndex[p]--
-						node.mu.Unlock()
-
-						if node.nextIndex[p] < 1 {
-							node.nextIndex[p] = 1
-						}
-					}
-
-					return nil
-				})
+				conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", p), 5*time.Second)
 				if err != nil {
 					fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
+					return
+				}
+				conn.SetDeadline(time.Now().Add(5 * time.Second))
+				fmt.Println("[LOG] Sending append log entries")
+				ok, success, err := sendAppendEntries(conn, logMsg)
+				conn.Close()
+				if err != nil {
+					fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
+					return
+				}
+
+				if ok && success {
+					atomic.AddInt32(&successCount, 1)
+
+					node.mu.Lock()
+					node.matchIndex[p] = logMsg.prevLogIndex + int32(len(logMsg.entries))
+					node.nextIndex[p] = node.matchIndex[p] + 1
+					node.mu.Unlock()
+
+				} else if ok && !success {
+					node.mu.Lock()
+					node.nextIndex[p]--
+					node.mu.Unlock()
+
+					if node.nextIndex[p] < 1 {
+						node.nextIndex[p] = 1
+					}
 				}
 			}(port)
 

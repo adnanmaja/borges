@@ -52,21 +52,20 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 		switch opcode {
 		case 0x0004: // heartbeat
-			//[2B from][10B payload]
 			from, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			message, err := parseHeartbeat(conn)
+			term, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			fmt.Printf("[HEARTBEAT] message from %d: %s\n", from, string(message))
-			node.resetElectionTimer()
+			fmt.Printf("[HEARTBEAT] from %d (term %d)\n", from, term)
+			node.resetElectionTimer(term)
 
 		case 0x0005: // vote request
 			// req: [2B from][4B sender's term][4B lastLogIndex][4B lastLogTerm]

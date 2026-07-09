@@ -27,7 +27,7 @@ go run . -port 8081
 go run . -port 8082
 ```
 
-All nodes start as **Candidate**. The first node to time out and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
+All nodes start as **Follower**. The first node to time out and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
 
 ### Running the client
 
@@ -48,7 +48,6 @@ flowchart TD
     B --> E[listener.go<br/>TCP server & request dispatcher]
     B --> F[broker.go<br/>Multi-topic log registry]
     B --> G[log.go<br/>Log write / append / read]
-    B --> H[pool.go<br/>Persistent peer connection pool]
     E --> I[segment.go<br/>Log segment files on disk]
     F --> I
     G --> I
@@ -61,12 +60,11 @@ flowchart TD
 |---|---|
 | `main.go` | CLI flag parsing, node instantiation |
 | `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` for graceful teardown, `saveStates()`/`loadStates()` binary persistence |
-| `heartbeat.go` | Leader sends heartbeats to peers via the peer pool |
+| `heartbeat.go` | Leader sends heartbeats to peers over TCP |
 | `election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`) |
 | `listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
 | `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence |
 | `log.go` | Per-topic log manager (`Log` struct), write/append/read functions, wire-level log transmission, and disk log file management |
-| `pool.go` | `PeerPool` — persistent, reused TCP connections to peer nodes, with per-peer mutex and automatic reconnection on failure |
 | `segment.go` | Representation of individual `.log` data files (max 1MB) |
 | `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
 
@@ -96,7 +94,6 @@ type Node struct {
     matchIndex  map[int16]int32 // for each server, index of highest log entry known to be replicated
 
     broker *Broker   // multi-topic log registry
-    pool   *PeerPool // persistent peer connection pool
 
     listener        net.Listener  // TCP listener handle (used by Shutdown)
     heartbeatTicker *time.Ticker  // underlying ticker (used by Shutdown)
@@ -126,18 +123,6 @@ The main loop runs in `node.go` and multiplexes on three channels:
 | `heartbeat` | Every 5 seconds | If **Leader**, broadcast `Heartbeat()` to all peers |
 | `electionTimer.C` | After random timeout (8–18s) | If not Leader, call `StartElection()` |
 | `stopCh` | On `Shutdown()` | Exit the loop and clean up |
-
-## Peer Connection Pool (`PeerPool`)
-
-`pool.go` maintains one long-lived TCP connection per peer port, rather than opening a fresh dial on every heartbeat or vote request:
-
-```mermaid
-flowchart LR
-    PeerPool --> P1["peers[8081] → peerConn{conn, mu}"]
-    PeerPool --> P2["peers[8082] → peerConn{conn, mu}"]
-```
-
-`pool.Send(port, timeout, fn)` locks the target peer's connection, lazily dials if `conn == nil`, sets a deadline, calls the user-supplied function, and resets the connection to `nil` on any error so the next call reconnects cleanly. This eliminates repeated dial overhead and fixes a previous `defer conn.Close()` misuse in the heartbeat loop.
 
 ## Wire Protocol
 
@@ -307,16 +292,14 @@ Log persistence is segmented, with accompanying index files to optimize retrieva
 
 ## Graceful Shutdown
 
-`node.Shutdown()` performs an ordered teardown:
+`node.Shutdown()` persists volatile state and exits immediately:
 
-1. Closes `stopCh`, signaling the event loop and snapshot goroutine to exit.
-2. Closes the TCP listener to unblock `Accept()`.
-3. Calls `pool.Close()` to close all persistent peer connections.
-4. Calls `broker.Close()` to flush and close all open log segment files.
-5. Stops the election timer and heartbeat ticker.
+1. Locks the node mutex and calls `saveStates()` to persist `currentTerm` and `votedFor` to disk.
+2. Locks the broker mutex and writes the consumer-group offset map to `data/<port>/offsets_snapshot.json`.
+3. Calls `os.Exit(0)` — the process terminates immediately regardless of any in-flight goroutines.
 
 ## Current Limitations & Future Improvements
 
 - **In-memory volatile metadata** — `currentTerm` and `votedFor` are persisted on every state change, but in-memory log entries (`[]Entry`) are not yet recovered from disk segments on restart.
-- **No RPC retry** — dial failures via `PeerPool.Send` are logged but silently skipped.
+- **No RPC retry** — dial failures are logged but silently skipped.
 - **Single-response produce** — the server sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished.

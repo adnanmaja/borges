@@ -1,10 +1,23 @@
 # Raft Consensus Implementation
 
-A minimal [Raft](https://raft.github.io/) consensus protocol implementation over TCP in Go with log persistence.
+A minimal [Raft](https://raft.github.io/) consensus protocol implementation over TCP in Go, with log persistence and a client-facing produce/consume API.
 
-## How to Run
+## Contents
 
-### Running the Nodes
+- [Getting Started](#getting-started)
+- [Architecture](#architecture)
+- [Node State](#node-state)
+- [Event Loop](#event-loop-startloop)
+- [Peer Connection Pool](#peer-connection-pool-peerpool)
+- [Wire Protocol](#wire-protocol)
+- [State Persistence](#state-persistence)
+- [Log Persistence (WAL & Indexing)](#log-persistence-wal--indexing)
+- [Graceful Shutdown](#graceful-shutdown)
+- [Current Limitations & Future Improvements](#current-limitations--future-improvements)
+
+## Getting Started
+
+### Running the nodes
 
 Open three terminals and run one instance on each port:
 
@@ -14,9 +27,9 @@ go run . -port 8081
 go run . -port 8082
 ```
 
-All nodes start as **Candidate**. The first node to timeout and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
+All nodes start as **Candidate**. The first node to time out and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
 
-### Running the Client
+### Running the client
 
 A reference client lives in the `client/` subdirectory:
 
@@ -25,44 +38,24 @@ cd client
 go run . -port 8080
 ```
 
-
 ## Architecture
 
-```
-┌─────────────┐
-│   main.go   │  Entry point. Parses the -port flag and starts a Node.
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│   node.go   │  Node & Entry structs, constructor, startLoop() event loop, graceful Shutdown().
-└──────┬──────┘
-       │
-├──────────────────┬──────────────────┬──────────────────┬──────────────────┬─────────────────┐
-│                  │                  │                  │                  │                 │
-▼                  ▼                  ▼                  ▼                  ▼                 ▼
-┌───────────┐ ┌─────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌──────────┐
-│heartbeat.go│ │election.go│ │listener.go  │ │  broker.go  │ │   log.go    │ │ pool.go  │
-│Send        │ │Election  │ │TCP server   │ │Multi-topic  │ │Log write,   │ │Persistent│
-│heartbeats  │ │campaign  │ │& dispatcher │ │log registry │ │append, read │ │peer pool │
-└───────────┘ └─────────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────────┘
-                                 │               │               │
-                                 │               └───────┬───────┘
-                                 │                       │
-                                 └───────────┬───────────┘
-                                             │
-                                             ▼
-                                      ┌─────────────┐
-                                      │ segment.go  │  Log segment files on disk
-                                      └──────┬──────┘
-                                             │
-                                             ▼
-                                      ┌─────────────┐
-                                      │  index.go   │  Index lookup files on disk
-                                      └─────────────┘
+```mermaid
+flowchart TD
+    A[main.go<br/>Entry point — parses -port flag, starts a Node] --> B[node.go<br/>Node & Entry structs, startLoop event loop, graceful Shutdown]
+    B --> C[heartbeat.go<br/>Sends heartbeats]
+    B --> D[election.go<br/>Runs election campaigns]
+    B --> E[listener.go<br/>TCP server & request dispatcher]
+    B --> F[broker.go<br/>Multi-topic log registry]
+    B --> G[log.go<br/>Log write / append / read]
+    B --> H[pool.go<br/>Persistent peer connection pool]
+    E --> I[segment.go<br/>Log segment files on disk]
+    F --> I
+    G --> I
+    I --> J[index.go<br/>Index lookup files on disk]
 ```
 
-### File Responsibilities
+### File responsibilities
 
 | File | Role |
 |---|---|
@@ -77,63 +70,52 @@ go run . -port 8080
 | `segment.go` | Representation of individual `.log` data files (max 1MB) |
 | `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
 
----
-
 ## Node State
 
 ```go
 type Entry struct {
-	timestamp int64
-	payload   string
-	term      int32
+    timestamp int64
+    payload   string
+    term      int32
 }
 
 type Node struct {
-	port        int16
-	role        string            // "Follower", "Candidate", or "Leader"
-	currentTerm int32
-	votedFor    int16
-	voteCount   int32
+    port        int16
+    role        string          // "Follower", "Candidate", or "Leader"
+    currentTerm int32
+    votedFor    int16
+    voteCount   int32
 
-	heartbeat     <-chan time.Time  // fires every 5s — Leader sends heartbeats
-	electionTimer *time.Timer      // fires on timeout — triggers election
-	lastHeartbeat time.Time
+    heartbeat     <-chan time.Time // fires every 5s — Leader sends heartbeats
+    electionTimer *time.Timer      // fires on timeout — triggers election
+    lastHeartbeat time.Time
 
-	entries     []Entry           // replicated log entries (1-based index)
-	commitIndex int32             // index of highest log entry known to be committed
-	nextIndex   map[int16]int32   // for each server, index of the next log entry to send
-	matchIndex  map[int16]int32   // for each server, index of highest log entry known to be replicated
+    entries     []Entry         // replicated log entries (1-based index)
+    commitIndex int32           // index of highest log entry known to be committed
+    nextIndex   map[int16]int32 // for each server, index of the next log entry to send
+    matchIndex  map[int16]int32 // for each server, index of highest log entry known to be replicated
 
-	broker          *Broker       // multi-topic log registry
-	pool            *PeerPool     // persistent peer connection pool
+    broker *Broker   // multi-topic log registry
+    pool   *PeerPool // persistent peer connection pool
 
-	listener        net.Listener  // TCP listener handle (used by Shutdown)
-	heartbeatTicker *time.Ticker  // underlying ticker (used by Shutdown)
-	stopCh          chan struct{}  // closed to signal all goroutines to exit
+    listener        net.Listener  // TCP listener handle (used by Shutdown)
+    heartbeatTicker *time.Ticker  // underlying ticker (used by Shutdown)
+    stopCh          chan struct{} // closed to signal all goroutines to exit
 
-	mu sync.Mutex                 // protects node state access
+    mu sync.Mutex // protects node state access
 }
 ```
 
-### Role Transitions
+### Role transitions
 
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: Election timeout
+    Candidate --> Follower: Re-discovers Leader (heartbeat)
+    Candidate --> Leader: Wins majority vote
+    Leader --> Follower: Discovers higher term
 ```
-  ┌──────────┐
-  │ Follower │◄────────── Heartbeat from Leader
-  └────┬─────┘
-       │ Election timeout
-       ▼
-   ┌───────────┐
-   │ Candidate │── Re-discovers Leader (heartbeat) ──► Follower
-   └─────┬─────┘
-         │ Wins majority vote (voteCount >= 1)
-         ▼
-   ┌────────┐
-   │ Leader │
-   └────────┘
-```
-
----
 
 ## Event Loop (`startLoop`)
 
@@ -145,184 +127,150 @@ The main loop runs in `node.go` and multiplexes on three channels:
 | `electionTimer.C` | After random timeout (8–18s) | If not Leader, call `StartElection()` |
 | `stopCh` | On `Shutdown()` | Exit the loop and clean up |
 
----
-
 ## Peer Connection Pool (`PeerPool`)
 
-`pool.go` introduces a persistent connection pool for outbound peer communication. Rather than opening a fresh TCP dial on every heartbeat or vote request, `PeerPool` maintains one long-lived connection per peer port.
+`pool.go` maintains one long-lived TCP connection per peer port, rather than opening a fresh dial on every heartbeat or vote request:
 
+```mermaid
+flowchart LR
+    PeerPool --> P1["peers[8081] → peerConn{conn, mu}"]
+    PeerPool --> P2["peers[8082] → peerConn{conn, mu}"]
 ```
-PeerPool
-  ├── peers[8081] → peerConn { conn, mu }
-  └── peers[8082] → peerConn { conn, mu }
-```
 
-`pool.Send(port, timeout, fn)` locks the target peer's connection, lazily dials if `conn == nil`, sets a deadline, calls the user-supplied function, and resets the connection to `nil` on any error so the next call reconnects cleanly. This eliminates repeated dial overhead and fixes the previous `defer conn.Close()` misuse in the heartbeat loop.
-
----
+`pool.Send(port, timeout, fn)` locks the target peer's connection, lazily dials if `conn == nil`, sets a deadline, calls the user-supplied function, and resets the connection to `nil` on any error so the next call reconnects cleanly. This eliminates repeated dial overhead and fixes a previous `defer conn.Close()` misuse in the heartbeat loop.
 
 ## Wire Protocol
 
 All messages are TCP frames with a binary layout.
 
-### Common Header
+### Common header
 
-All request frames start with a common header:
-```
-┌───────────┬─────────┬──────────┐
-│ 2B opcode │ 2B from │ (payload)│
-└───────────┴─────────┴──────────┘
-```
+| Field | Size | Description |
+|---|---|---|
+| opcode | 2B | Request type |
+| from | 2B | Sender identifier |
+| payload | variable | Opcode-specific body |
 
-Response frames consist of a 2-byte status/response code:
-```
-┌───────────────┐
-│ 2B response   │
-└───────────────┘
-```
+Response frames consist of a single 2-byte status/response code.
 
-### Opcode Types
+### Opcode types
 
-| Opcode | Command Name | Direction | Description |
+| Opcode | Command | Direction | Description |
 |---|---|---|---|
 | `0x0004` | Heartbeat | Leader → Follower | Periodic keep-alive |
 | `0x0005` | Vote Request | Candidate → Peers | Candidate requests votes |
-| `0x0006` | Client Produce | Client → Node | Client sends a **batch** of log entries to a topic |
+| `0x0006` | Client Produce | Client → Node | Client sends a batch of log entries to a topic |
 | `0x0007` | Append Entries | Leader → Follower | Leader replicates log entries to followers |
 | `0x0008` | Client Consume | Client → Node | Client requests log entries by topic, offset, and count |
 | `0x0009` | Commit Offset | Client → Node | Client commits a consumer offset for a group/topic |
 | `0x0010` | Fetch Offset | Client → Node | Client retrieves a previously committed offset for a group/topic |
 
-#### Client Produce (`0x0006`) Payload Details
+#### Client Produce (`0x0006`)
 
-The produce request now supports **message batching** — multiple entries can be sent in a single request (up to a maximum of 100 entries per batch):
+Supports batching — up to 100 entries per request.
 
-```
-┌───────────┬─────────┬──────────────┬──────────┬───────────────────────────────────────────────┐
-│ 2B opcode │ 2B from │ 4B topicLen  │  topic   │ 4B entriesCount + loop([4B payloadLen][payload])│
-└───────────┴─────────┴──────────────┴──────────┴───────────────────────────────────────────────┘
-```
+| Field | Size | Description |
+|---|---|---|
+| opcode | 2B | `0x0006` |
+| from | 2B | Sender identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic to write to |
+| entriesCount | 4B | Number of entries in this batch (max 100) |
+| payloadLen | 4B | Length of an entry's payload *(repeated per entry)* |
+| payload | `payloadLen` bytes | Entry value *(repeated per entry)* |
 
-* **topicLen** (`4B int32`): Length of the topic name.
-* **topic** (`topicLen` bytes): The topic name to write to.
-* **entriesCount** (`4B int32`): Number of log entries in this batch (max 100).
-* For each entry in the batch:
-  * **payloadLen** (`4B int32`): Length of the entry payload.
-  * **payload** (`payloadLen` bytes): The log entry value.
+#### Append Entries (`0x0007`)
 
-#### Append Entries (`0x0007`) Payload Details
+| Field | Size | Description |
+|---|---|---|
+| leadTerm | 4B | Leader's current term |
+| prevIdx | 4B | Index of the log entry preceding the new ones |
+| prevTerm | 4B | Term of the `prevIdx` entry |
+| commitIdx | 4B | Leader's commit index |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic these entries belong to |
+| entryNum | 2B | Number of entries being sent |
 
-The `0x0007` payload structure is:
-```
-┌─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬───────────┬───────────────────────────┐
-│ 4B leadTerm │ 4B prevIdx  │ 4B prevTerm │ 4B commitIdx│ 4B topicLen │    topic    │ 2B entryNum│ (entryNum * entry structs)│
-└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴───────────┴───────────────────────────┘
-```
-Where each entry struct is:
-```
-┌──────────────┬─────────────┬──────────────┐
-│ 8B timestamp │ 4B entryLen │ entryPayload │
-└──────────────┴─────────────┴──────────────┘
-```
+Each of the `entryNum` entry structs is laid out as:
 
-* **leadTerm** (`4B int32`): Leader's current term.
-* **prevIdx** (`4B int32`): Index of log entry immediately preceding new ones.
-* **prevTerm** (`4B int32`): Term of `prevIdx` entry.
-* **commitIdx** (`4B int32`): Leader's commit index.
-* **topicLen** (`4B int32`): Length of the topic name.
-* **topic** (`topicLen` bytes): The topic name this entry belongs to.
-* **entryNum** (`2B int16`): Number of log entries being sent.
-* **timestamp** (`8B int64`): Millisecond Unix timestamp of when the entry was created.
-* **entryLen** (`4B int32`): The log command string length.
-* **entryPayload** (`entryLen` bytes): The log command string.
+| Field | Size | Description |
+|---|---|---|
+| timestamp | 8B | Millisecond Unix timestamp when the entry was created |
+| entryLen | 4B | Length of the log command string |
+| entryPayload | `entryLen` bytes | The log command string |
 
-#### Client Consume Request (`0x0008`) Payload Details
+#### Client Consume (`0x0008`)
 
-The `0x0008` request payload structure is:
-```
-┌──────────────┬──────────────┬───────────────────┬──────────────┐
-│ 4B topicLen  │    topic     │ 8B startOffset    │ 4B sizeLimit │
-└──────────────┴──────────────┴───────────────────┴──────────────┘
-```
+Request:
 
-* **topicLen** (`4B int32`): Length of the topic name.
-* **topic** (`topicLen` bytes): The topic name to consume from.
-* **startOffset** (`8B int64`): The starting relative offset of log entries to retrieve.
-* **sizeLimit** (`4B int32`): Maximum number of entries to return.
+| Field | Size | Description |
+|---|---|---|
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic to consume from |
+| startOffset | 8B | Starting relative offset to retrieve from |
+| sizeLimit | 4B | Maximum number of entries to return |
 
-The response to `0x0008` starts with a 2-byte response code:
-* **Success (`0x0001`)** response layout:
+Response — success (`0x0001`):
 
-  ```
-  [2B status success][4B entryCount](entryCount * [8B timestamp][4B payloadLen][payload])
-  ```
-  * **status** (`2B uint16`): Success status code (`0x0001`).
-  * **entryCount** (`4B int32`): Number of log entries being returned.
-  * **timestamp** (`8B int64`): Timestamp of a log entry.
-  * **payloadLen** (`4B uint32`): Length of the log payload.
-  * **payload**: The string value of the entry's payload.
-* **Failure (`0x0002`)** response layout:
-  ```
-    [2B status code]
-  ```
-  * **status** (`2B uint16`): Failure status code (`0x0002`).
+| Field | Size | Description |
+|---|---|---|
+| status | 2B | `0x0001` |
+| entryCount | 4B | Number of entries returned |
+| timestamp | 8B | Timestamp of an entry *(repeated per entry)* |
+| payloadLen | 4B | Length of the entry payload *(repeated per entry)* |
+| payload | `payloadLen` bytes | Entry value *(repeated per entry)* |
 
-#### Commit Offset (`0x0009`) Payload Details
+Response — failure (`0x0002`): a single 2-byte status code.
 
-```
-┌──────────────────┬────────────┬──────────────┬──────────┬──────────────────┐
-│ 4B groupIdLen    │  groupId   │ 4B topicLen  │  topic   │ 8B offsetCommit  │
-└──────────────────┴────────────┴──────────────┴──────────┴──────────────────┘
-```
+#### Commit Offset (`0x0009`)
 
-* **groupIdLen** (`4B int32`): Length of the consumer group id.
-* **groupId** (`groupIdLen` bytes): Consumer group identifier.
-* **topicLen** (`4B int32`): Length of the topic name.
-* **topic** (`topicLen` bytes): Topic name.
-* **offsetCommit** (`8B int64`): Offset value to commit for this group+topic.
+| Field | Size | Description |
+|---|---|---|
+| groupIdLen | 4B | Length of the consumer group id |
+| groupId | `groupIdLen` bytes | Consumer group identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic name |
+| offsetCommit | 8B | Offset value to commit for this group/topic |
 
-Response is a 2-byte status code.
+Response: a single 2-byte status code.
 
-#### Fetch Offset (`0x0010`) Payload Details
+#### Fetch Offset (`0x0010`)
 
-```
-┌──────────────────┬────────────┬──────────────┬──────────┐
-│ 4B groupIdLen    │  groupId   │ 4B topicLen  │  topic   │
-└──────────────────┴────────────┴──────────────┴──────────┘
-```
+Request:
 
-* **groupIdLen** (`4B int32`): Length of the consumer group id.
-* **groupId** (`groupIdLen` bytes): Consumer group identifier.
-* **topicLen** (`4B int32`): Length of the topic name.
-* **topic** (`topicLen` bytes): Topic name.
+| Field | Size | Description |
+|---|---|---|
+| groupIdLen | 4B | Length of the consumer group id |
+| groupId | `groupIdLen` bytes | Consumer group identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic name |
 
-The response to `0x0010` starts with a 2-byte response code followed by the offset:
-```
-[2B status success][8B offset]
-```
+Response:
 
-### Response / Status Codes (Common)
+| Field | Size | Description |
+|---|---|---|
+| status | 2B | `0x0001` on success |
+| offset | 8B | The committed offset |
+
+### Response / status codes (common)
 
 | Code | Value | Meaning |
 |---|---|---|
 | Success / Granted | `0x0001` | Vote granted, log write/append succeeded, or consume succeeded |
 | Failure / Denied | `0x0002` | Vote denied, log write/append failed, or consume failed |
 
----
-
 ## State Persistence
 
-### Volatile State (`saveStates` / `loadStates`)
+### Volatile state (`saveStates` / `loadStates`)
 
-`currentTerm` and `votedFor` are persisted to disk as a compact 6-byte **binary file** (`data/<port>/states.bin`):
+`currentTerm` and `votedFor` are persisted to disk as a compact 6-byte binary file (`data/<port>/states.bin`):
 
-```
-┌──────────────────┬────────────────┐
-│ 4B currentTerm   │ 2B votedFor    │
-└──────────────────┴────────────────┘
-```
+| Field | Size |
+|---|---|
+| currentTerm | 4B |
+| votedFor | 2B |
 
-Unlike the previous implementation that used a JSON ticker goroutine running every 10 seconds, `saveStates` is now a **synchronous, on-demand call** invoked at every state-change point that matters for correctness:
+`saveStates` is a synchronous, on-demand call invoked at every state-change point that matters for correctness, rather than a periodic JSON write:
 
 | When `saveStates` is called |
 |---|
@@ -330,47 +278,45 @@ Unlike the previous implementation that used a JSON ticker goroutine running eve
 | A node grants a vote to a remote candidate |
 | A follower's `Append` call detects that the leader's term is newer than its own |
 
-This ensures volatile state is durable at each critical transition rather than on a best-effort periodic schedule.
+### Offset snapshot (`saveSnapshot` / `loadSnapshot`)
 
-### Offset Snapshot (`saveSnapshot` / `loadSnapshot`)
-
-The `Broker`'s consumer-group offset map is still persisted periodically (every 10s) to `data/<port>/offsets_sanpshot.json` by the `broker.saveSnapshot` goroutine launched from `NewNode`.
-
----
+The `Broker`'s consumer-group offset map is persisted periodically (every 10s) to `data/<port>/offsets_snapshot.json` by the `broker.saveSnapshot` goroutine launched from `NewNode`.
 
 ## Log Persistence (WAL & Indexing)
 
-The node implements segmented log persistence with accompanying index files to optimize retrieval:
+Log persistence is segmented, with accompanying index files to optimize retrieval:
 
-1. **Log Segments**: Per-topic log files are stored on disk inside `data/<port>/log/<topic>/` as `<offset>.log` files (e.g. `00000000000000000000.log`). Each file represents a log segment with a maximum size limit of 1MB.
-2. **Index Files**: For each segment, a companion `.index` file (e.g. `<offset>.index`) is created. It stores 16-byte index entries with the binary layout:
-    ```
-   [8B relativeOffset][8B byteOffset]
-    ```
-   This is used to perform high-performance binary search lookups mapping a target relative offset directly to a byte offset position in the corresponding segment log file.
-3. **Log Disk Format**:
-   Each entry written to a `.log` file has the following binary layout:
-   ```
-   [8B timestamp][4B payloadLen][payload]
-   ```
-4. **Startup Recovery**:
-   When a node starts up, it creates per-topic directories under `data/<port>/log/<topic>/`. In-memory entry recovery from disk segments is not yet re-implemented for the multi-topic layout.
+1. **Log segments** — per-topic log files are stored on disk under `data/<port>/log/<topic>/` as `<offset>.log` files (e.g. `00000000000000000000.log`). Each file represents a segment with a 1MB size limit.
+2. **Index files** — each segment has a companion `<offset>.index` file storing 16-byte index entries:
 
----
+   | Field | Size |
+   |---|---|
+   | relativeOffset | 8B |
+   | byteOffset | 8B |
+
+   This enables binary search from a target relative offset directly to a byte position in the segment file.
+3. **Log entry format** — each entry written to a `.log` file has the layout:
+
+   | Field | Size |
+   |---|---|
+   | timestamp | 8B |
+   | payloadLen | 4B |
+   | payload | `payloadLen` bytes |
+
+4. **Startup recovery** — on startup, a node creates per-topic directories under `data/<port>/log/<topic>/`. In-memory entry recovery from disk segments is not yet re-implemented for the multi-topic layout.
 
 ## Graceful Shutdown
 
 `node.Shutdown()` performs an ordered teardown:
-1. Closes `stopCh`, signalling the event loop and snapshot goroutine to exit.
+
+1. Closes `stopCh`, signaling the event loop and snapshot goroutine to exit.
 2. Closes the TCP listener to unblock `Accept()`.
 3. Calls `pool.Close()` to close all persistent peer connections.
 4. Calls `broker.Close()` to flush and close all open log segment files.
 5. Stops the election timer and heartbeat ticker.
 
----
-
 ## Current Limitations & Future Improvements
 
-* **In-Memory Volatile Metadata** — `currentTerm` and `votedFor` are now persisted on every state-change, but in-memory log entries (`[]Entry`) are not yet recovered from disk segments on restart.
-* **No RPC retry** — Dial failures via `PeerPool.Send` are printed but silently skipped.
-* **Single-response produce** — The server sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished.
+- **In-memory volatile metadata** — `currentTerm` and `votedFor` are persisted on every state change, but in-memory log entries (`[]Entry`) are not yet recovered from disk segments on restart.
+- **No RPC retry** — dial failures via `PeerPool.Send` are logged but silently skipped.
+- **Single-response produce** — the server sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished.

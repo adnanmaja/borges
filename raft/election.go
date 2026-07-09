@@ -25,21 +25,22 @@ func (node *Node) StartElection() {
 			for _, port := range ports {
 				if port == node.port {
 					continue
-				} else {
-					conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 5*time.Second)
-					if err != nil {
-						fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
-						continue
-					}
-					lastLogIndex := len(node.entries) - 1
-					lastLogTerm := node.entries[lastLogIndex].term
-					granted, err := sendVoteRequest(conn, node.port, node.currentTerm, int32(lastLogIndex), lastLogTerm)
+				}
+				lastLogIndex := len(node.entries) - 1
+				lastLogTerm := node.entries[lastLogIndex].term
+				err := node.pool.Send(port, 5*time.Second, func(conn net.Conn) error {
 					fmt.Println("[ELECTION] Everybody please vote for me")
-					if granted {
-						conn.Close()
-						node.CountVote()
-
+					granted, err := sendVoteRequest(conn, node.port, node.currentTerm, int32(lastLogIndex), lastLogTerm)
+					if err != nil {
+						return err
 					}
+					if granted {
+						node.CountVote()
+					}
+					return nil
+				})
+				if err != nil {
+					fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
 				}
 			}
 		}

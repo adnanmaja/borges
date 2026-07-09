@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,6 +23,8 @@ type Log struct {
 	segmentOffsets []int64
 	nextOffset     int64
 	topic          string
+
+	fdCache map[string]*os.File
 }
 
 type appendLogMsg struct {
@@ -34,14 +37,50 @@ type appendLogMsg struct {
 	topic        string
 }
 
+func (l *Log) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var errs []error
+	if l.activeIndex != nil {
+		if err := l.activeIndex.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if l.activeSegment != nil {
+		if err := l.activeSegment.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for path, f := range l.fdCache {
+		if err := f.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		delete(l.fdCache, path)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("log close errors: %v", errs)
+	}
+	return nil
+}
+
+var writeBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 4+8+MaxPayloadSize)
+		return &b
+	},
+}
+
 func NewLog(port int16, topic string) *Log {
 	l := &Log{
-		topic: topic,
+		topic:   topic,
+		fdCache: make(map[string]*os.File),
 	}
 
 	var savedOffsets []int64
 
-	files, _ := os.ReadDir(fmt.Sprintf("data/%d/%s/", port, topic))
+	files, _ := os.ReadDir(fmt.Sprintf("data/%d/log/%s/", port, topic))
 	for _, file := range files {
 		if !file.IsDir() && filepath.Ext(file.Name()) == ".log" {
 			fileName := strings.TrimSuffix(file.Name(), ".log")
@@ -72,13 +111,13 @@ func NewLog(port int16, topic string) *Log {
 }
 
 func createInitFile(port int16) {
-	path := fmt.Sprintf("logs/%d/%020d.log", port, 0)
+	path := fmt.Sprintf("data/%d/log/%020d.log", port, 0)
 	f, _ := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
 	if f != nil {
 		f.Close()
 	}
-	ipath := fmt.Sprintf("logs/%d/%020d.index", port, 0)
-	f2, _ := os.OpenFile(ipath, os.O_CREATE|os.O_WRONLY, 0644)
+	indexPath := fmt.Sprintf("data/%d/log/%020d.index", port, 0)
+	f2, _ := os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if f2 != nil {
 		f2.Close()
 	}
@@ -88,6 +127,7 @@ func (l *Log) prepareSegment(size int64, port int16) (*Segment, int64) {
 	if (l.activeSegment.currentSize + size) > l.activeSegment.maxSize {
 		l.activeSegment.file.Close()
 		if l.activeIndex != nil {
+			l.activeIndex.writer.Flush()
 			l.activeIndex.file.Close()
 		}
 		l.segments = append(l.segments, l.activeSegment)
@@ -121,11 +161,6 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 			go func(p int16) {
 				defer wg.Done()
 
-				conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", p), 5*time.Second)
-				if err != nil {
-					fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
-					return
-				}
 				logMsg := appendLogMsg{
 					leaderTerm:   node.currentTerm,
 					leaderPort:   node.port,
@@ -136,25 +171,35 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 					topic:        l.topic,
 				}
 
-				ok, success, err := sendAppendEntries(conn, logMsg)
-				fmt.Println("[LOG] Sending append log entries")
-
-				if ok && success {
-					atomic.AddInt32(&successCount, 1)
-
-					node.mu.Lock()
-					node.matchIndex[p] = logMsg.prevLogIndex + int32(len(logMsg.entries))
-					node.nextIndex[p] = node.matchIndex[p] + 1
-					node.mu.Unlock()
-
-				} else if ok && !success {
-					node.mu.Lock()
-					node.nextIndex[p]--
-					node.mu.Unlock()
-
-					if node.nextIndex[p] < 1 {
-						node.nextIndex[p] = 1
+				err := node.pool.Send(p, 5*time.Second, func(conn net.Conn) error {
+					fmt.Println("[LOG] Sending append log entries")
+					ok, success, err := sendAppendEntries(conn, logMsg)
+					if err != nil {
+						return err
 					}
+
+					if ok && success {
+						atomic.AddInt32(&successCount, 1)
+
+						node.mu.Lock()
+						node.matchIndex[p] = logMsg.prevLogIndex + int32(len(logMsg.entries))
+						node.nextIndex[p] = node.matchIndex[p] + 1
+						node.mu.Unlock()
+
+					} else if ok && !success {
+						node.mu.Lock()
+						node.nextIndex[p]--
+						node.mu.Unlock()
+
+						if node.nextIndex[p] < 1 {
+							node.nextIndex[p] = 1
+						}
+					}
+
+					return nil
+				})
+				if err != nil {
+					fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
 				}
 			}(port)
 
@@ -263,29 +308,42 @@ func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 }
 
 func (l *Log) writeToDisk(entry Entry, node *Node) {
-	totalSize := 8 + 4 + len(entry.payload)
-	buf := make([]byte, totalSize)
+	// each entries on disk: [4B CRC32][8B unixmilli timestamp][4B payload len][payload]
+	bufPtr := writeBufferPool.Get().(*[]byte)
+	buf := *bufPtr
+
+	totalSize := 4 + 8 + 4 + len(entry.payload)
+	writeBuf := buf[:totalSize]
 	off := 0
 
-	binary.BigEndian.PutUint64(buf[off:], uint64(entry.timestamp))
+	checksum := crc32.ChecksumIEEE([]byte(entry.payload))
+	binary.BigEndian.PutUint32(writeBuf[off:], checksum)
+	off += 4
+	binary.BigEndian.PutUint64(writeBuf[off:], uint64(entry.timestamp))
 	off += 8
-
-	binary.BigEndian.PutUint32(buf[off:], uint32(len(entry.payload)))
+	binary.BigEndian.PutUint32(writeBuf[off:], uint32(len(entry.payload)))
 	off += 4
 
-	copy(buf[off:], []byte(entry.payload))
+	copy(writeBuf[off:], []byte(entry.payload))
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	segment, _ := l.prepareSegment(int64(totalSize), node.port)
-	_, err := segment.file.Write(buf)
+
+	segment.mu.Lock()
+	_, err := segment.file.Write(writeBuf)
+	segment.mu.Unlock()
 	if err != nil {
+		l.mu.Unlock()
+		writeBufferPool.Put(bufPtr)
 		panic("writeToDisk failed")
 	}
 
 	l.activeIndex.WriteIndex(l.nextOffset, int64(totalSize))
 	l.nextOffset++
+	l.mu.Unlock()
+
+	writeBufferPool.Put(bufPtr)
+
 }
 
 func (l *Log) findIndexFile(relativeOffset int64, port int16) string {
@@ -317,17 +375,27 @@ func (l *Log) Read(startOffset int64, node *Node, sizeLimit int32) ([]Entry, err
 	logPath := strings.TrimSuffix(indexPath, filepath.Ext(indexPath)) + ".log"
 	l.mu.Unlock()
 
-	indexFile, err := os.Open(indexPath)
-	if err != nil {
-		return nil, err
+	indexFile, exists := l.fdCache[indexPath]
+	if !exists {
+		var err error
+		indexFile, err = os.Open(indexPath)
+		if err != nil {
+			l.mu.Unlock()
+			return nil, err
+		}
+		l.fdCache[indexPath] = indexFile
 	}
-	defer indexFile.Close()
 
-	logFile, err := os.Open(logPath)
-	if err != nil {
-		return nil, err
+	logFile, exists := l.fdCache[logPath]
+	if !exists {
+		var err error
+		logFile, err = os.Open(logPath)
+		if err != nil {
+			l.mu.Unlock()
+			return nil, err
+		}
+		l.fdCache[logPath] = logFile
 	}
-	defer logFile.Close()
 
 	var entries []Entry
 	var sizeCount int = 0
@@ -338,20 +406,25 @@ func (l *Log) Read(startOffset int64, node *Node, sizeLimit int32) ([]Entry, err
 			break
 		}
 
-		headerBuf := make([]byte, 12)
+		headerBuf := make([]byte, 16)
 		_, err = logFile.ReadAt(headerBuf, int64(absOffset))
 		if err != nil {
 			break
 		}
 
-		timestamp := binary.BigEndian.Uint64(headerBuf[0:8])
-		payloadLen := binary.BigEndian.Uint32(headerBuf[8:12])
+		savedChecksum := binary.BigEndian.Uint32(headerBuf[0:4])
+		timestamp := binary.BigEndian.Uint64(headerBuf[4:12])
+		payloadLen := binary.BigEndian.Uint32(headerBuf[12:16])
 
 		payloadBuf := make([]byte, payloadLen)
 
-		_, err = logFile.ReadAt(payloadBuf, int64(absOffset)+12)
+		_, err = logFile.ReadAt(payloadBuf, int64(absOffset)+16)
 		if err != nil {
 			break
+		}
+
+		if savedChecksum != crc32.ChecksumIEEE(payloadBuf) {
+			return nil, fmt.Errorf("Data corrupt, checksum mismatch")
 		}
 
 		sizeCount += len(headerBuf) + len(payloadBuf)

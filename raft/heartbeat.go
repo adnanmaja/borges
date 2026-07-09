@@ -11,20 +11,17 @@ func (node *Node) Heartbeat() {
 	for _, port := range ports {
 		if port == node.port {
 			continue
-		} else {
-			//[2B command (heartbeat (0x0001))][2B from][10B heartbeat! msg]
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 5*time.Second)
-			if err != nil {
-				fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
-				continue
-			}
-			sendHeartbeat(node.port, conn)
-			conn.Close()
+		}
+		err := node.pool.Send(port, 5*time.Second, func(conn net.Conn) error {
+			return sendHeartbeat(node.port, conn)
+		})
+		if err != nil {
+			fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
 		}
 	}
 }
 
-func sendHeartbeat(senderPort int16, conn net.Conn) {
+func sendHeartbeat(senderPort int16, conn net.Conn) error {
 	payload := "heartbeat!"
 
 	totalSize := 2 + 2 + 10
@@ -40,7 +37,5 @@ func sendHeartbeat(senderPort int16, conn net.Conn) {
 	copy(messageFrame[off:], []byte(payload))
 
 	_, err := conn.Write(messageFrame)
-	if err != nil {
-		panic(err)
-	}
+	return err
 }

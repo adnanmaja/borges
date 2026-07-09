@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ type Index struct {
 	path       string
 	byteOffset int64
 	mu         sync.RWMutex
+	writer     *bufio.Writer
 }
 
 func NewIndex(port int16, offset int64, logSize int64, topic string) *Index {
@@ -26,7 +28,17 @@ func NewIndex(port int16, offset int64, logSize int64, topic string) *Index {
 		file:       file,
 		path:       filePath,
 		byteOffset: logSize,
+		writer:     bufio.NewWriterSize(file, 4096), //4kb buffer
 	}
+}
+
+func (idx *Index) Close() error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if err := idx.writer.Flush(); err != nil {
+		return err
+	}
+	return idx.file.Close()
 }
 
 func (idx *Index) WriteIndex(relOffset, size int64) {
@@ -36,7 +48,7 @@ func (idx *Index) WriteIndex(relOffset, size int64) {
 
 	idx.mu.Lock()
 	idx.byteOffset += size
-	_, err := idx.file.Write(buf)
+	_, err := idx.writer.Write(buf)
 	idx.mu.Unlock()
 	if err != nil {
 		// whatever, not gonna error anyway trust

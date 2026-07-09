@@ -16,6 +16,15 @@ go run . -port 8082
 
 All nodes start as **Candidate**. The first node to timeout and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
 
+### Running the Client
+
+A reference client lives in the `client/` subdirectory:
+
+```bash
+cd client
+go run . -port 8080
+```
+
 
 ## Architecture
 
@@ -26,17 +35,17 @@ All nodes start as **Candidate**. The first node to timeout and gather a majorit
        │
        ▼
 ┌─────────────┐
-│   node.go   │  Node & Entry structs, constructor, and main event loop.
+│   node.go   │  Node & Entry structs, constructor, startLoop() event loop, graceful Shutdown().
 └──────┬──────┘
        │
 ├──────────────────┬──────────────────┬──────────────────┬──────────────────┬─────────────────┐
 │                  │                  │                  │                  │                 │
 ▼                  ▼                  ▼                  ▼                  ▼                 ▼
-┌───────────┐ ┌─────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│heartbeat.go│ │election.go│ │listener.go  │ │  broker.go  │ │   log.go    │
-│Send        │ │Election  │ │TCP server   │ │Multi-topic  │ │Log write,   │
-│heartbeats  │ │campaign  │ │& dispatcher │ │log registry │ │append, read │
-└───────────┘ └─────────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+┌───────────┐ ┌─────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌──────────┐
+│heartbeat.go│ │election.go│ │listener.go  │ │  broker.go  │ │   log.go    │ │ pool.go  │
+│Send        │ │Election  │ │TCP server   │ │Multi-topic  │ │Log write,   │ │Persistent│
+│heartbeats  │ │campaign  │ │& dispatcher │ │log registry │ │append, read │ │peer pool │
+└───────────┘ └─────────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────────┘
                                  │               │               │
                                  │               └───────┬───────┘
                                  │                       │
@@ -58,12 +67,13 @@ All nodes start as **Candidate**. The first node to timeout and gather a majorit
 | File | Role |
 |---|---|
 | `main.go` | CLI flag parsing, node instantiation |
-| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, background goroutines for periodic state/snapshot persistence |
-| `heartbeat.go` | Leader sends heartbeats |
-| `election.go` | Election campaign (`StartElection`), vote request/response, victory announcement (`CountVote`) |
-| `listener.go` | TCP listener, command/opcode parsing, and dispatching client reads/writes and raft requests |
+| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` for graceful teardown, `saveStates()`/`loadStates()` binary persistence |
+| `heartbeat.go` | Leader sends heartbeats to peers via the peer pool |
+| `election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`) |
+| `listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
 | `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence |
 | `log.go` | Per-topic log manager (`Log` struct), write/append/read functions, wire-level log transmission, and disk log file management |
+| `pool.go` | `PeerPool` — persistent, reused TCP connections to peer nodes, with per-peer mutex and automatic reconnection on failure |
 | `segment.go` | Representation of individual `.log` data files (max 1MB) |
 | `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
 
@@ -79,12 +89,13 @@ type Entry struct {
 }
 
 type Node struct {
-	port          int16
-	role          string            // "Follower", "Candidate", or "Leader"
-	currentTerm   int32
-	votedFor      int16
-	voteCount     int32
-	heartbeat     <-chan time.Time // fires every 5s — Leader sends heartbeats
+	port        int16
+	role        string            // "Follower", "Candidate", or "Leader"
+	currentTerm int32
+	votedFor    int16
+	voteCount   int32
+
+	heartbeat     <-chan time.Time  // fires every 5s — Leader sends heartbeats
 	electionTimer *time.Timer      // fires on timeout — triggers election
 	lastHeartbeat time.Time
 
@@ -92,7 +103,13 @@ type Node struct {
 	commitIndex int32             // index of highest log entry known to be committed
 	nextIndex   map[int16]int32   // for each server, index of the next log entry to send
 	matchIndex  map[int16]int32   // for each server, index of highest log entry known to be replicated
-	broker      *Broker           // multi-topic log registry
+
+	broker          *Broker       // multi-topic log registry
+	pool            *PeerPool     // persistent peer connection pool
+
+	listener        net.Listener  // TCP listener handle (used by Shutdown)
+	heartbeatTicker *time.Ticker  // underlying ticker (used by Shutdown)
+	stopCh          chan struct{}  // closed to signal all goroutines to exit
 
 	mu sync.Mutex                 // protects node state access
 }
@@ -120,12 +137,27 @@ type Node struct {
 
 ## Event Loop (`startLoop`)
 
-The main loop runs in `node.go` and multiplexes on two channels. On startup, two background goroutines are also launched for periodic disk persistence:
+The main loop runs in `node.go` and multiplexes on three channels:
 
 | Channel | When it fires | Action |
 |---|---|---|
 | `heartbeat` | Every 5 seconds | If **Leader**, broadcast `Heartbeat()` to all peers |
 | `electionTimer.C` | After random timeout (8–18s) | If not Leader, call `StartElection()` |
+| `stopCh` | On `Shutdown()` | Exit the loop and clean up |
+
+---
+
+## Peer Connection Pool (`PeerPool`)
+
+`pool.go` introduces a persistent connection pool for outbound peer communication. Rather than opening a fresh TCP dial on every heartbeat or vote request, `PeerPool` maintains one long-lived connection per peer port.
+
+```
+PeerPool
+  ├── peers[8081] → peerConn { conn, mu }
+  └── peers[8082] → peerConn { conn, mu }
+```
+
+`pool.Send(port, timeout, fn)` locks the target peer's connection, lazily dials if `conn == nil`, sets a deadline, calls the user-supplied function, and resets the connection to `nil` on any error so the next call reconnects cleanly. This eliminates repeated dial overhead and fixes the previous `defer conn.Close()` misuse in the heartbeat loop.
 
 ---
 
@@ -151,15 +183,32 @@ Response frames consist of a 2-byte status/response code:
 
 ### Opcode Types
 
-| Opcode | Command Name | Direction | Payload | Description |
-|---|---|---|---|---|
-| `0x0004` | Heartbeat | Leader → Follower | `10B` message text (`"heartbeat!"`) | Periodic keep-alive |
-| `0x0005` | Vote Request | Candidate → Peers | *(none beyond header)* | Candidate requests votes |
-| `0x0006` | Client Log Write | Client → Node | `4B` topic len + `topic` + `4B` payload len + `payload` | Client sends new log command to a specific topic |
-| `0x0007` | Append Entries | Leader → Follower | See detailed payload below | Leader replicates log entries to followers |
-| `0x0008` | Client Consume Request | Client → Node | `4B` topic len + `topic` + `8B` start offset + `4B` size limit | Client requests log entries by topic, offset, and count |
-| `0x0009` | Commit Offset | Client → Node | `4B` group id len + `group id` + `4B` topic len + `topic` + `8B` offset commit | Client commits a consumer offset for a group/topic |
-| `0x0010` | Fetch Offset | Client → Node | `4B` group id len + `group id` + `4B` topic len + `topic` | Client retrieves a previously committed offset for a group/topic |
+| Opcode | Command Name | Direction | Description |
+|---|---|---|---|
+| `0x0004` | Heartbeat | Leader → Follower | Periodic keep-alive |
+| `0x0005` | Vote Request | Candidate → Peers | Candidate requests votes |
+| `0x0006` | Client Produce | Client → Node | Client sends a **batch** of log entries to a topic |
+| `0x0007` | Append Entries | Leader → Follower | Leader replicates log entries to followers |
+| `0x0008` | Client Consume | Client → Node | Client requests log entries by topic, offset, and count |
+| `0x0009` | Commit Offset | Client → Node | Client commits a consumer offset for a group/topic |
+| `0x0010` | Fetch Offset | Client → Node | Client retrieves a previously committed offset for a group/topic |
+
+#### Client Produce (`0x0006`) Payload Details
+
+The produce request now supports **message batching** — multiple entries can be sent in a single request (up to a maximum of 100 entries per batch):
+
+```
+┌───────────┬─────────┬──────────────┬──────────┬───────────────────────────────────────────────┐
+│ 2B opcode │ 2B from │ 4B topicLen  │  topic   │ 4B entriesCount + loop([4B payloadLen][payload])│
+└───────────┴─────────┴──────────────┴──────────┴───────────────────────────────────────────────┘
+```
+
+* **topicLen** (`4B int32`): Length of the topic name.
+* **topic** (`topicLen` bytes): The topic name to write to.
+* **entriesCount** (`4B int32`): Number of log entries in this batch (max 100).
+* For each entry in the batch:
+  * **payloadLen** (`4B int32`): Length of the entry payload.
+  * **payload** (`payloadLen` bytes): The log entry value.
 
 #### Append Entries (`0x0007`) Payload Details
 
@@ -182,7 +231,7 @@ Where each entry struct is:
 * **commitIdx** (`4B int32`): Leader's commit index.
 * **topicLen** (`4B int32`): Length of the topic name.
 * **topic** (`topicLen` bytes): The topic name this entry belongs to.
-* **entryNum** (`2B int16`): Number of log entries being sent (can be 0 for heartbeat/probe, but currently heartbeat uses `0x0004`).
+* **entryNum** (`2B int16`): Number of log entries being sent.
 * **timestamp** (`8B int64`): Millisecond Unix timestamp of when the entry was created.
 * **entryLen** (`4B int32`): The log command string length.
 * **entryPayload** (`entryLen` bytes): The log command string.
@@ -261,16 +310,33 @@ The response to `0x0010` starts with a 2-byte response code followed by the offs
 
 ---
 
-## Background Persistence Goroutines
+## State Persistence
 
-Two goroutines run in the background from `NewNode()` to periodically persist state to disk:
+### Volatile State (`saveStates` / `loadStates`)
 
-| Goroutine | Interval | Persists | File |
-|---|---|---|---|
-| `saveStates` | Every 10s | `currentTerm` and `votedFor` to JSON | `data/<port>/states.json` |
-| `saveSnapshot` | Every 10s | `Broker.offsets` (consumer-group offset map) to JSON | `data/<port>/offsets_sanpshot.json` |
+`currentTerm` and `votedFor` are persisted to disk as a compact 6-byte **binary file** (`data/<port>/states.bin`):
 
-On startup, `loadStates()` and `loadSnapshot()` read these files back to restore the last known state.
+```
+┌──────────────────┬────────────────┐
+│ 4B currentTerm   │ 2B votedFor    │
+└──────────────────┴────────────────┘
+```
+
+Unlike the previous implementation that used a JSON ticker goroutine running every 10 seconds, `saveStates` is now a **synchronous, on-demand call** invoked at every state-change point that matters for correctness:
+
+| When `saveStates` is called |
+|---|
+| A node votes for itself at the start of an election |
+| A node grants a vote to a remote candidate |
+| A follower's `Append` call detects that the leader's term is newer than its own |
+
+This ensures volatile state is durable at each critical transition rather than on a best-effort periodic schedule.
+
+### Offset Snapshot (`saveSnapshot` / `loadSnapshot`)
+
+The `Broker`'s consumer-group offset map is still persisted periodically (every 10s) to `data/<port>/offsets_sanpshot.json` by the `broker.saveSnapshot` goroutine launched from `NewNode`.
+
+---
 
 ## Log Persistence (WAL & Indexing)
 
@@ -292,8 +358,19 @@ The node implements segmented log persistence with accompanying index files to o
 
 ---
 
+## Graceful Shutdown
+
+`node.Shutdown()` performs an ordered teardown:
+1. Closes `stopCh`, signalling the event loop and snapshot goroutine to exit.
+2. Closes the TCP listener to unblock `Accept()`.
+3. Calls `pool.Close()` to close all persistent peer connections.
+4. Calls `broker.Close()` to flush and close all open log segment files.
+5. Stops the election timer and heartbeat ticker.
+
+---
+
 ## Current Limitations & Future Improvements
 
-* **In-Memory Volatile Metadata** — Node terms and election state (`votedFor`, `currentTerm`) are persisted to disk every 10s (see [Background Persistence Goroutines](#background-persistence-goroutines)), but recent changes between ticks may be lost on crash.
-* **Connection Leaks** — `Heartbeat` broadcasts defer closing connections in a loop, keeping connections open longer than necessary.
-* **No RPC retry** — Dial failures are printed but silently skipped.
+* **In-Memory Volatile Metadata** — `currentTerm` and `votedFor` are now persisted on every state-change, but in-memory log entries (`[]Entry`) are not yet recovered from disk segments on restart.
+* **No RPC retry** — Dial failures via `PeerPool.Send` are printed but silently skipped.
+* **Single-response produce** — The server sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished.

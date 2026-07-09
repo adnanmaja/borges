@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,13 @@ type Segment struct {
 	maxSize     int64
 	firstOffset int64
 	timestamp   int64
+	mu          sync.Mutex
+}
+
+func (s *Segment) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.file.Close()
 }
 
 func NewSegment(port int16, offset int64, topic string) *Segment {

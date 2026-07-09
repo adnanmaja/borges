@@ -14,6 +14,7 @@ func (node *Node) startListener() {
 	if err != nil {
 		panic(fmt.Sprintf("error starting server: %s", err))
 	}
+	node.listener = listener
 	fmt.Printf("Listening at :%d\n", node.port)
 
 	for {

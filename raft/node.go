@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -33,6 +34,11 @@ type Node struct {
 	matchIndex  map[int16]int32
 
 	broker *Broker
+	pool   *PeerPool
+
+	listener        net.Listener
+	heartbeatTicker *time.Ticker
+	stopCh          chan struct{}
 
 	mu sync.Mutex
 }
@@ -44,12 +50,14 @@ func NewNode(port int16) *Node {
 	heartbeatTicker := time.NewTicker(5 * time.Second)
 
 	node := &Node{
-		port:          port,
-		role:          "Candidate",
-		electionTimer: electionTicker,
-		heartbeat:     heartbeatTicker.C,
-		voteCount:     0,
-		lastHeartbeat: time.Now(),
+		port:            port,
+		role:            "Candidate",
+		electionTimer:   electionTicker,
+		heartbeat:       heartbeatTicker.C,
+		heartbeatTicker: heartbeatTicker,
+		stopCh:          make(chan struct{}),
+		voteCount:       0,
+		lastHeartbeat:   time.Now(),
 		entries: []Entry{
 			0: {payload: "", term: 0},
 		},
@@ -64,8 +72,9 @@ func NewNode(port int16) *Node {
 	}
 
 	node.broker = NewBroker()
+	node.pool = NewPeerPool()
 	node.loadStates()
-	go node.saveSnapshot(node.broker)
+	go node.broker.saveSnapshot(node.port, node.stopCh)
 	go node.saveStates()
 	node.loadSnapshot(node.broker)
 
@@ -91,8 +100,6 @@ func (node *Node) startLoop() {
 		case <-node.heartbeat:
 			if node.role == "Leader" {
 				node.Heartbeat()
-			} else {
-				// nothing
 			}
 		case <-node.electionTimer.C:
 			if node.role == "Leader" {
@@ -102,8 +109,29 @@ func (node *Node) startLoop() {
 				node.role = "Candidate"
 				node.StartElection()
 			}
+		case <-node.stopCh:
+			fmt.Println("[SHUTDOWN] event loop exiting")
+			return
 		}
 	}
+}
+
+func (node *Node) Shutdown() {
+	fmt.Println("\n[SHUTDOWN] initiating graceful shutdown...")
+
+	close(node.stopCh)
+
+	if node.listener != nil {
+		node.listener.Close()
+	}
+
+	node.pool.Close()
+	node.broker.Close()
+
+	node.electionTimer.Stop()
+	node.heartbeatTicker.Stop()
+
+	fmt.Println("[SHUTDOWN] goodbye!")
 }
 
 func (node *Node) saveStates() {

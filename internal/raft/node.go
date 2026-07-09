@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"encoding/binary"
@@ -20,6 +20,7 @@ type Entry struct {
 
 type Node struct {
 	port        int16
+	peers       []int16
 	role        string
 	currentTerm int32
 	votedFor    int16
@@ -34,7 +35,7 @@ type Node struct {
 	nextIndex   map[int16]int32
 	matchIndex  map[int16]int32
 
-	broker *Broker
+	broker          *Broker
 	listener        net.Listener
 	heartbeatTicker *time.Ticker
 	stopCh          chan struct{}
@@ -42,7 +43,7 @@ type Node struct {
 	mu sync.Mutex
 }
 
-func NewNode(port int16) *Node {
+func NewNode(port int16, peers []int16) *Node {
 	randSec := 8 + rand.Intn(11)
 
 	electionTicker := time.NewTimer(time.Duration(randSec) * time.Second)
@@ -50,6 +51,7 @@ func NewNode(port int16) *Node {
 
 	node := &Node{
 		port:            port,
+		peers:           peers,
 		role:            "Follower",
 		electionTimer:   electionTicker,
 		heartbeat:       heartbeatTicker.C,
@@ -65,9 +67,8 @@ func NewNode(port int16) *Node {
 		matchIndex:  make(map[int16]int32),
 	}
 
-	ports := []int16{8080, 8081, 8082}
-	for _, port := range ports {
-		os.MkdirAll(fmt.Sprintf("data/%d/log", port), 0755)
+	for _, p := range peers {
+		os.MkdirAll(fmt.Sprintf("data/%d/log", p), 0755)
 	}
 
 	node.broker = NewBroker()
@@ -76,19 +77,18 @@ func NewNode(port int16) *Node {
 	go node.saveStates()
 	node.loadSnapshot(node.broker)
 
-	for _, port := range ports {
-		if port == node.port {
+	for _, peer := range peers {
+		if peer == node.port {
 			continue
-		} else {
-			node.nextIndex[port] = 1
-			node.matchIndex[port] = 0
 		}
+		node.nextIndex[peer] = 1
+		node.matchIndex[peer] = 0
 	}
 
 	return node
 }
 
-func (node *Node) startLoop() {
+func (node *Node) Start() {
 	go node.startListener()
 
 	rand.New(rand.NewSource(time.Now().UnixNano()))

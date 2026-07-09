@@ -1,128 +1,301 @@
 # Borges
 
-Borges is a minimal, low-level, single-node message broker inspired by Apache Kafka, implemented entirely from scratch in Go.
+Borges is a minimal, low-level message broker inspired by Apache Kafka, implemented entirely from scratch in Go, with a working Raft consensus layer for leader election and log replication across a cluster.
 
-Instead of relying on high-level database abstractions, this project focuses on the core storage and networking primitives of event streaming: building an append-only log, managing segment rotation, implementing custom binary wire protocols, and structuring efficient index files.
+Instead of relying on high-level database or clustering abstractions, this project focuses on the core primitives of distributed event streaming: building an append-only log, managing segment rotation, implementing custom binary wire protocols, structuring efficient index files, and replicating that log consistently across nodes using Raft.
 
+Nodes start as Followers, hold Elections when a leader goes quiet, and once a Leader emerges, it replicates every produced entry to its peers via AppendEntries. Clients produce, consume, and commit offsets through a custom binary protocol, with per-topic segmented logs and index files handling on-disk persistence underneath it all.
 
+## Contents
 
-## Core Architecture
-
-Borges is designed as a single-node broker tailored for highly concurrent TCP clients. It interacts directly with the file system to achieve low-overhead message persistence.
-
-* **Broker (`broker.go`):** Acts as the central orchestrator mapping topics to logs and managing consumer group offsets. It handles crash recovery by loading historical snapshots on startup.
-* **TCP Server (`network.go`):** A concurrent server listening on `:8080`. It handles state transitions for active connections and executes custom framing commands. Supports graceful shutdown via `SIGINT`/`SIGTERM` by draining connections, flushing buffers, and forcing an offset snapshot.
-* **Log Storage (`log.go`):** Manages the lifecycle of an append-only sequence of records distributed across discrete disk segments. Runs a background janitor goroutine every 30 seconds for retention-based cleanup.
-* **Segments (`segment.go`):** Fixed-size log segments (1 KB for testing, 1 MB for production). When a segment fills, it rotates seamlessly to a new file. Features fine-grained, per-segment locks to maximize write concurrency.
-* **Index Engine (`index.go`):** Maps relative offsets to physical byte positions within the `.log` files. Utilizes a 16-byte fixed layout per entry (`8-byte relative offset + 8-byte absolute offset`) to perform efficient $O(\log n)$ binary search lookups.
-
-
-
-## Custom Wire Protocol
-
-Borges utilizes a raw, custom binary protocol over TCP to bypass the overhead of text-based serialization (like JSON or HTTP framing).
-
-### Requests
-
-| Command | Hex Opcode | Payload Layout |
-| --- | --- | --- |
-| **Produce** | `0x01` | `[2B topic len][topic][4B msg count] + loop([4B payload len][N-byte payload])` |
-| **Consume** | `0x02` | `[2B topic len][topic][8B offset]` |
-| **Fetch Offset** | `0x03` | `[2B group len][group id][2B topic len][topic]` |
-| **Commit Offset** | `0x04` | `[2B group len][group id][2B topic len][topic][8B offset]` |
-
-### Responses
-
-* **Produce:** `[0x00]` (Success) or `[0x01]` (Error)
-* **Consume:** `[0x00][8B Unix ms timestamp][4B payload len][N-byte payload]`
-* **Fetch Offset:** `[0x00][8B offset]`
-* **Commit Offset:** `[0x00]` (Success)
-
-
-
-## Storage Format
-
-Topics are entirely isolated into dedicated directories under the `logs/` root. Files utilize zero-padded 64-bit integer naming schemas based on the **base offset** of the segment:
-
-```text
-logs/
-├── offset_snapshot.json           # Consumer group offset snapshot (JSON)
-└── <topic>/
-    ├── 00000000000000000000.log   # Raw record payloads
-    ├── 00000000000000000000.index # Offset-to-byte positions
-    ├── 00000000000000000032.log   # New log segment after rotation
-    └── 00000000000000000032.index # New index segment
-
-```
-
-### On-Disk Binary Layouts
-
-* **Log Record:** `[4B CRC32 Checksum][4B Payload Length][8B Unix ms Timestamp][N-byte Payload]`
-* **Index Entry:** `[8B Relative Offset][8B Absolute Byte Offset]`
-* **Retention Policy:** Closed segments older than 10 minutes are automatically reaped by a background cleaner running every 30 seconds to bound disk utilization.
-
-
-## Performance Optimizations
-
-To maximize throughput and minimize latency, several low-level optimizations have been implemented:
-
-* **Index Binary Search:** Upgraded offset resolution from an $O(n)$ linear scan to an $O(\log n)$ binary search over fixed-width index files.
-* **Segment-Level Locking:** Replaced a global log lock with granular, per-segment mutexes (`segment.mu`), enabling parallel writes to different segments.
-* **Buffered Index I/O:** Batches index writes using a 4 KB `bufio.Writer`. The buffer is only flushed to disk during segment rotation or graceful shutdowns, saving thousands of costly system calls.
-* **In-Memory Index Caching:** Hot index lookups are served entirely from an in-memory `map[int64]int64` guarded by a `sync.RWMutex`, ensuring lock-free reads alongside active writes.
-* **Write Buffer Pooling:** Uses a `sync.Pool` to reuse pre-allocated byte slices on the hot `Produce` path, drastically lowering GC pressure and heap allocations.
-* **Zero-State Random Access:** Leverages `os.File.ReadAt` for message consumption. This bypasses the need to maintain seek-pointer state adjustments, unlocking thread-safe concurrent reads on shared file descriptors.
-* **Compile-Time Debug Gating:** Guarded intensive `[DEBUG]` logs behind a compile-time `const debug = false` toggle, completely stripping formatting overhead from the production binary.
-* **Batch Message Framing:** The `Produce` wire protocol supports multi-message payloads, reducing network round-trips and transport framing overhead.
-
-
-
-## Benchmarks
-
-*Measured by streaming 1,000 records of 1,024 bytes each, averaged over 10 runs.*
-
-| Metric | Apache Kafka v4.3.1 | Borges (Single Node) |
-| --- | --- | --- |
-| **Throughput** | 3,615.54 records/sec | **37,198.98 records/sec** |
-| **Latency** | 38.90 ms | **27.15 ms** |
-| **Peak Memory** | 668.70 MB | **9.42 MB** |
-
-![Comparison chart](docs/comparison_1.png)
-
-> **Disclaimer:** This comparison is intended for educational amusement. Apache Kafka is a highly distributed, partitioned, replicated, production-grade system running on the JVM with complex persistence and durability guarantees. Borges achieves its performance by operating entirely as a single-node broker without network replication, consumer rebalancing, or multi-partition coordination.
-
----
+- [Getting Started](#getting-started)
+- [Architecture](#architecture)
+- [Node State](#node-state)
+- [Event Loop](#event-loop-startloop)
+- [Peer Connection Pool](#peer-connection-pool-peerpool)
+- [Wire Protocol](#wire-protocol)
+- [State Persistence](#state-persistence)
+- [Log Persistence (WAL & Indexing)](#log-persistence-wal--indexing)
+- [Graceful Shutdown](#graceful-shutdown)
+- [Current Limitations & Future Improvements](#current-limitations--future-improvements)
 
 ## Getting Started
 
-### Prerequisites
+### Running the nodes
 
-* Go 1.21 or higher
-
-### Running the Broker
-
-Spin up the TCP streaming server:
+Open three terminals and run one instance on each port:
 
 ```bash
-go run main.go
-
+go run . -port 8080
+go run . -port 8081
+go run . -port 8082
 ```
 
----
+All nodes start as **Follower**. The first node to time out and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
 
-## Project Structure
 
-```text
-├── main.go             # Application entrypoint & configuration
-├── internal/  
-│   └── engine/  
-│       ├── broker.go   # Topic state and offset coordinator
-│       ├── log.go      # Log manager & retention controller
-│       ├── segment.go  # Isolated data segment mechanics
-│       ├── index.go    # Fixed-width binary index lookups
-│       ├── config.go   # Global constants
-│       └── network.go  # TCP server and protocol framing parser
-├── logs/               # Active runtime data directory (Git-ignored)
-└── go.mod              # Go module definition
+## Architecture
 
+```mermaid
+flowchart TD
+    A[main.go<br/>Entry point — parses -port flag, starts a Node] --> B[node.go<br/>Node & Entry structs, startLoop event loop, graceful Shutdown]
+    B --> C[heartbeat.go<br/>Sends heartbeats]
+    B --> D[election.go<br/>Runs election campaigns]
+    B --> E[listener.go<br/>TCP server & request dispatcher]
+    B --> F[broker.go<br/>Multi-topic log registry]
+    B --> G[log.go<br/>Log write / append / read]
+    E --> I[segment.go<br/>Log segment files on disk]
+    F --> I
+    G --> I
+    I --> J[index.go<br/>Index lookup files on disk]
 ```
+
+### File responsibilities
+
+| File | Role |
+|---|---|
+| `main.go` | CLI flag parsing, node instantiation |
+| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` for graceful teardown, `saveStates()`/`loadStates()` binary persistence |
+| `heartbeat.go` | Leader sends heartbeats to peers over TCP |
+| `election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`) |
+| `listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
+| `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence |
+| `log.go` | Per-topic log manager (`Log` struct), write/append/read functions, wire-level log transmission, and disk log file management |
+| `segment.go` | Representation of individual `.log` data files (max 1MB) |
+| `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
+
+## Node State
+
+```go
+type Entry struct {
+    timestamp int64
+    payload   string
+    term      int32
+}
+
+type Node struct {
+    port        int16
+    role        string          // "Follower", "Candidate", or "Leader"
+    currentTerm int32
+    votedFor    int16
+    voteCount   int32
+
+    heartbeat     <-chan time.Time // fires every 5s — Leader sends heartbeats
+    electionTimer *time.Timer      // fires on timeout — triggers election
+    lastHeartbeat time.Time
+
+    entries     []Entry         // replicated log entries (1-based index)
+    commitIndex int32           // index of highest log entry known to be committed
+    nextIndex   map[int16]int32 // for each server, index of the next log entry to send
+    matchIndex  map[int16]int32 // for each server, index of highest log entry known to be replicated
+
+    broker *Broker   // multi-topic log registry
+
+    listener        net.Listener  // TCP listener handle (used by Shutdown)
+    heartbeatTicker *time.Ticker  // underlying ticker (used by Shutdown)
+    stopCh          chan struct{} // closed to signal all goroutines to exit
+
+    mu sync.Mutex // protects node state access
+}
+```
+
+### Role transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: Election timeout
+    Candidate --> Follower: Re-discovers Leader (heartbeat)
+    Candidate --> Leader: Wins majority vote
+    Leader --> Follower: Discovers higher term
+```
+
+## Event Loop (`startLoop`)
+
+The main loop runs in `node.go` and multiplexes on three channels:
+
+| Channel | When it fires | Action |
+|---|---|---|
+| `heartbeat` | Every 5 seconds | If **Leader**, broadcast `Heartbeat()` to all peers |
+| `electionTimer.C` | After random timeout (8–18s) | If not Leader, call `StartElection()` |
+| `stopCh` | On `Shutdown()` | Exit the loop and clean up |
+
+## Wire Protocol
+
+All messages are TCP frames with a binary layout.
+
+### Common header
+
+| Field | Size | Description |
+|---|---|---|
+| opcode | 2B | Request type |
+| from | 2B | Sender identifier |
+| payload | variable | Opcode-specific body |
+
+Response frames consist of a single 2-byte status/response code.
+
+### Opcode types
+
+| Opcode | Command | Direction | Description |
+|---|---|---|---|
+| `0x0004` | Heartbeat | Leader → Follower | Periodic keep-alive |
+| `0x0005` | Vote Request | Candidate → Peers | Candidate requests votes |
+| `0x0006` | Client Produce | Client → Node | Client sends a batch of log entries to a topic |
+| `0x0007` | Append Entries | Leader → Follower | Leader replicates log entries to followers |
+| `0x0008` | Client Consume | Client → Node | Client requests log entries by topic, offset, and count |
+| `0x0009` | Commit Offset | Client → Node | Client commits a consumer offset for a group/topic |
+| `0x0010` | Fetch Offset | Client → Node | Client retrieves a previously committed offset for a group/topic |
+
+#### Client Produce (`0x0006`)
+
+Supports batching — up to 100 entries per request.
+
+| Field | Size | Description |
+|---|---|---|
+| opcode | 2B | `0x0006` |
+| from | 2B | Sender identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic to write to |
+| entriesCount | 4B | Number of entries in this batch (max 100) |
+| payloadLen | 4B | Length of an entry's payload *(repeated per entry)* |
+| payload | `payloadLen` bytes | Entry value *(repeated per entry)* |
+
+#### Append Entries (`0x0007`)
+
+| Field | Size | Description |
+|---|---|---|
+| leadTerm | 4B | Leader's current term |
+| prevIdx | 4B | Index of the log entry preceding the new ones |
+| prevTerm | 4B | Term of the `prevIdx` entry |
+| commitIdx | 4B | Leader's commit index |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic these entries belong to |
+| entryNum | 2B | Number of entries being sent |
+
+Each of the `entryNum` entry structs is laid out as:
+
+| Field | Size | Description |
+|---|---|---|
+| timestamp | 8B | Millisecond Unix timestamp when the entry was created |
+| entryLen | 4B | Length of the log command string |
+| entryPayload | `entryLen` bytes | The log command string |
+
+#### Client Consume (`0x0008`)
+
+Request:
+
+| Field | Size | Description |
+|---|---|---|
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic to consume from |
+| startOffset | 8B | Starting relative offset to retrieve from |
+| sizeLimit | 4B | Maximum number of entries to return |
+
+Response — success (`0x0001`):
+
+| Field | Size | Description |
+|---|---|---|
+| status | 2B | `0x0001` |
+| entryCount | 4B | Number of entries returned |
+| timestamp | 8B | Timestamp of an entry *(repeated per entry)* |
+| payloadLen | 4B | Length of the entry payload *(repeated per entry)* |
+| payload | `payloadLen` bytes | Entry value *(repeated per entry)* |
+
+Response — failure (`0x0002`): a single 2-byte status code.
+
+#### Commit Offset (`0x0009`)
+
+| Field | Size | Description |
+|---|---|---|
+| groupIdLen | 4B | Length of the consumer group id |
+| groupId | `groupIdLen` bytes | Consumer group identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic name |
+| offsetCommit | 8B | Offset value to commit for this group/topic |
+
+Response: a single 2-byte status code.
+
+#### Fetch Offset (`0x0010`)
+
+Request:
+
+| Field | Size | Description |
+|---|---|---|
+| groupIdLen | 4B | Length of the consumer group id |
+| groupId | `groupIdLen` bytes | Consumer group identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic name |
+
+Response:
+
+| Field | Size | Description |
+|---|---|---|
+| status | 2B | `0x0001` on success |
+| offset | 8B | The committed offset |
+
+### Response / status codes (common)
+
+| Code | Value | Meaning |
+|---|---|---|
+| Success / Granted | `0x0001` | Vote granted, log write/append succeeded, or consume succeeded |
+| Failure / Denied | `0x0002` | Vote denied, log write/append failed, or consume failed |
+
+## State Persistence
+
+### Volatile state (`saveStates` / `loadStates`)
+
+`currentTerm` and `votedFor` are persisted to disk as a compact 6-byte binary file (`data/<port>/states.bin`):
+
+| Field | Size |
+|---|---|
+| currentTerm | 4B |
+| votedFor | 2B |
+
+`saveStates` is a synchronous, on-demand call invoked at every state-change point that matters for correctness, rather than a periodic JSON write:
+
+| When `saveStates` is called |
+|---|
+| A node votes for itself at the start of an election |
+| A node grants a vote to a remote candidate |
+| A follower's `Append` call detects that the leader's term is newer than its own |
+
+### Offset snapshot (`saveSnapshot` / `loadSnapshot`)
+
+The `Broker`'s consumer-group offset map is persisted periodically (every 10s) to `data/<port>/offsets_snapshot.json` by the `broker.saveSnapshot` goroutine launched from `NewNode`.
+
+## Log Persistence (WAL & Indexing)
+
+Log persistence is segmented, with accompanying index files to optimize retrieval:
+
+1. **Log segments** — per-topic log files are stored on disk under `data/<port>/log/<topic>/` as `<offset>.log` files (e.g. `00000000000000000000.log`). Each file represents a segment with a 1MB size limit.
+2. **Index files** — each segment has a companion `<offset>.index` file storing 16-byte index entries:
+
+   | Field | Size |
+   |---|---|
+   | relativeOffset | 8B |
+   | byteOffset | 8B |
+
+   This enables binary search from a target relative offset directly to a byte position in the segment file.
+3. **Log entry format** — each entry written to a `.log` file has the layout:
+
+   | Field | Size |
+   |---|---|
+   | timestamp | 8B |
+   | payloadLen | 4B |
+   | payload | `payloadLen` bytes |
+
+4. **Startup recovery** — on startup, a node creates per-topic directories under `data/<port>/log/<topic>/`. In-memory entry recovery from disk segments is not yet re-implemented for the multi-topic layout.
+
+## Graceful Shutdown
+
+`node.Shutdown()` persists volatile state and exits immediately:
+
+1. Locks the node mutex and calls `saveStates()` to persist `currentTerm` and `votedFor` to disk.
+2. Locks the broker mutex and writes the consumer-group offset map to `data/<port>/offsets_snapshot.json`.
+3. Calls `os.Exit(0)` — the process terminates immediately regardless of any in-flight goroutines.
+
+## Current Limitations & Future Improvements
+
+- **In-memory volatile metadata** — `currentTerm` and `votedFor` are persisted on every state change, but in-memory log entries (`[]Entry`) are not yet recovered from disk segments on restart.
+- **No RPC retry** — dial failures are logged but silently skipped.
+- **Single-response produce** — the server sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished.

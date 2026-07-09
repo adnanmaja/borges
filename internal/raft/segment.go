@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"fmt"
@@ -28,25 +28,25 @@ func NewSegment(port int16, offset int64, topic string) *Segment {
 
 	err := os.MkdirAll(fmt.Sprintf("data/%d/log/%s", port, topic), 0755)
 	if err != nil {
-		panic(fmt.Sprintf("log failed log fialed log failed: %s", err))
+		panic(fmt.Sprintf("log failed: %s", err))
 	}
 
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		panic(fmt.Sprintf("log failed log fialed log failed: %s", err))
+		panic(fmt.Sprintf("log failed: %s", err))
 	}
 
 	stat, err := file.Stat()
 	if err != nil {
 		file.Close()
-		panic(fmt.Sprintf("stat failed stat fialed stat failed: %s", err))
+		panic(fmt.Sprintf("stat failed: %s", err))
 	}
 
 	return &Segment{
 		file:        file,
 		path:        filePath,
 		currentSize: int64(stat.Size()),
-		maxSize:     1 * 1024 * 1024, //1mb
+		maxSize:     1 * 1024 * 1024,
 		firstOffset: offset,
 		timestamp:   time.Now().UnixMilli(),
 	}

@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"encoding/binary"
@@ -41,7 +41,6 @@ func (node *Node) listenForMessage(conn net.Conn) {
 		_, err := io.ReadFull(conn, opcodeBuf)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// fmt.Println("Client disconnected normally.")
 			} else {
 				fmt.Println("\nClient disconnected abruptly:", err)
 			}
@@ -51,7 +50,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 		fmt.Println("opcode:", opcode)
 
 		switch opcode {
-		case 0x0004: // heartbeat
+		case 0x0004:
 			from, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -67,8 +66,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			fmt.Printf("[HEARTBEAT] from %d (term %d)\n", from, term)
 			node.resetElectionTimer(term)
 
-		case 0x0005: // vote request
-			// req: [2B from][4B sender's term][4B lastLogIndex][4B lastLogTerm]
+		case 0x0005:
 			sender, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -91,12 +89,11 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 			ok := node.Vote(sender, term, lastLogIndex, lastLogTerm)
 			if ok {
-				responseSuccess(conn) // "you got my vote"
+				responseSuccess(conn)
 			} else {
-				responseFail(conn) // "who do you think you are"
+				responseFail(conn)
 			}
-		case 0x0006: // log entry from client (produce)
-			// incoming: [2B from (irrelevant)][4B topic len][topic][4B entries count] + loop([4B payload length][payload])
+		case 0x0006:
 			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -147,8 +144,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				responseFail(conn)
 			}
 
-		case 0x0007: // leader's request to append entries.
-			// [2B leader's port (irrelevant for now)][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][4B topic len][topic][2B entryNum] + loop([8B timestamp][4B entryLen][entry])
+		case 0x0007:
 			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -226,9 +222,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				responseFail(conn)
 			}
 
-		case 0x0008: // client's consume request
-			// req: [2B from (irrelevant)][4B len topic][topic][8B target offset start][4B size limit]
-			// res: [2B fail/success][4B entry count] + loop([8B timestamp][4B payload length][payload])
+		case 0x0008:
 			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -262,7 +256,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 			headerFrame := make([]byte, 6)
-			binary.BigEndian.PutUint16(headerFrame[0:2], 0x0001) // success
+			binary.BigEndian.PutUint16(headerFrame[0:2], 0x0001)
 			binary.BigEndian.PutUint32(headerFrame[2:6], uint32(len(entries)))
 			conn.Write(headerFrame)
 
@@ -274,9 +268,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				conn.Write([]byte(entry.payload))
 			}
 
-		case 0x0009: // client's commit offset
-			// incoming: [4B group id len][group id][4B topic len][topic][8B offset commit]
-			// response: [2B response code]
+		case 0x0009:
 			groupIdLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -306,9 +298,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 			responseSuccess(conn)
 
-		case 0x0010: // fetch offset
-			// incoming: [4B group len][group id][4B topic len][topic]
-			// response: [2B response code][8B offset]
+		case 0x0010:
 			groupIdLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)

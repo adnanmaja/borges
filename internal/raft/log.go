@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"encoding/binary"
@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+const MaxPayloadSize int = 64 * 1024
 
 type Log struct {
 	segments       []*Segment
@@ -153,7 +155,7 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 	fmt.Println("[LOG] Appending the log entry:", string(entry))
 
 	if node.role == "Leader" {
-		for _, port := range ports {
+		for _, port := range node.peers {
 			if port == node.port {
 				continue
 			}
@@ -206,7 +208,7 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 
 		}
 		wg.Wait()
-		if successCount > int32(len(ports)/2) {
+		if successCount > int32(len(node.peers)/2) {
 			node.commitIndex = int32(len(node.entries) - 1)
 			return true
 		}
@@ -249,7 +251,6 @@ func (l *Log) Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, en
 }
 
 func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
-	// [0x0007][2B port][4B lead's term][4B prevLogIdx][4B prevLogTerm][4b leadCommitIndex][4B topic len][topic][2B entryCount] + loop([8B timestamp][4B entryLen][entry])
 	frameSize := 2 + 2 + 4 + 4 + 4 + 4 + 4 + len(logMsg.topic) + 2
 	frame := make([]byte, frameSize)
 	off := 0
@@ -309,7 +310,6 @@ func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 }
 
 func (l *Log) writeToDisk(entry Entry, node *Node) {
-	// each entries on disk: [4B CRC32][8B unixmilli timestamp][4B payload len][payload]
 	bufPtr := writeBufferPool.Get().(*[]byte)
 	buf := *bufPtr
 

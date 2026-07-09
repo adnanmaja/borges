@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"encoding/json"
@@ -54,7 +54,7 @@ func (b *Broker) FetchOffset(groupId, topic string) int64 {
 		return groupMap[topic]
 	}
 
-	return 0 //default
+	return 0
 }
 
 func (b *Broker) Close() error {
@@ -135,28 +135,3 @@ func (node *Node) loadSnapshot(b *Broker) error {
 
 	return json.Unmarshal(data, &b.offsets)
 }
-
-// func (b *Broker) Close() error {
-
-// 	b.mu.Lock()
-
-// 	var errs []error
-// 	for _, log := range b.logs {
-// 		if err := log.activeIndex.writer.Flush(); err != nil {
-// 			errs = append(errs, fmt.Errorf("failed to flush index: %w", err))
-// 		}
-
-// 		for path, f := range log.fdCache {
-// 			f.Close()
-// 			delete(log.fdCache, path)
-// 		}
-// 	}
-
-// 	b.mu.Unlock()
-// 	b.saveSnapshot()
-
-// 	if len(errs) > 0 {
-// 		return fmt.Errorf("encountered errors during shutdown: %v", errs)
-// 	}
-// 	return nil
-// }

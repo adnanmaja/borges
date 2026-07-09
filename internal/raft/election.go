@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"encoding/binary"
@@ -27,7 +27,7 @@ func (node *Node) StartElection() {
 
 		node.saveStates()
 
-		for _, port := range ports {
+		for _, port := range node.peers {
 			if port == node.port {
 				continue
 			}
@@ -88,11 +88,11 @@ func (node *Node) CountVote() {
 	node.voteCount++
 	fmt.Println("[ELECTION] Thank you!!")
 
-	if node.voteCount > int32((len(ports))/2) {
+	if node.voteCount > int32((len(node.peers))/2) {
 		node.role = "Leader"
 		fmt.Println("[ELECTION] Im the leader now")
 
-		for _, port := range ports {
+		for _, port := range node.peers {
 			if port == node.port {
 				continue
 			} else {
@@ -120,7 +120,6 @@ func (node *Node) resetElectionTimer(leaderTerm int32) {
 }
 
 func sendVoteRequest(conn net.Conn, senderPort int16, term, lastLogIndex, lastLogTerm int32) (bool, error) {
-	// [0x0005][2B from][4B sender's term][4B lastLogIndex][4B lastLogTerm]
 	totalSize := 2 + 2 + 4 + 4 + 4
 	frame := make([]byte, totalSize)
 	off := 0

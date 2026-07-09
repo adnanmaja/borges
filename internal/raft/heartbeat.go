@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"encoding/binary"
@@ -8,7 +8,7 @@ import (
 )
 
 func (node *Node) Heartbeat() {
-	for _, port := range ports {
+	for _, port := range node.peers {
 		if port == node.port {
 			continue
 		}

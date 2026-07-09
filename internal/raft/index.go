@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"bufio"
@@ -28,7 +28,7 @@ func NewIndex(port int16, offset int64, logSize int64, topic string) *Index {
 		file:       file,
 		path:       filePath,
 		byteOffset: logSize,
-		writer:     bufio.NewWriterSize(file, 4096), //4kb buffer
+		writer:     bufio.NewWriterSize(file, 4096),
 	}
 }
 
@@ -51,7 +51,6 @@ func (idx *Index) WriteIndex(relOffset, size int64) {
 	_, err := idx.writer.Write(buf)
 	idx.mu.Unlock()
 	if err != nil {
-		// whatever, not gonna error anyway trust
 	}
 }
 

@@ -34,6 +34,20 @@ go run . -port 8082 -peers 8080,8081
 All nodes start as **Follower**. The first node to time out and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
 
 
+## Benchmarking
+*Sending 10,000 records of 1024 Bytes, with 5 message pipelining depth and 15 records per request batch. Averaged over 10 runs*
+
+| Metric | Apache Kafka v4.3.1 | Borges (3 nodes, localhost)|
+| --- | --- | --- |
+| **Throughput** | 19,431.42 records/sec | **40,909.02 records/sec** |
+| **Data Rate** | 19.28 MB/sec | **39.95 MB/sec** |
+| **Peak Memory Usage** | 1,155.90 MB | **77.64 MB** |
+| **Latency** | 1,209.33 ms | **0.84 ms** |
+
+![Comparison chart](docs/comaprison_1.png)
+
+> **Disclaimer:** Not a serious comparison ofc, but a fun one regardless
+
 ## Architecture
 
 ```mermaid
@@ -44,6 +58,7 @@ flowchart TD
     B --> E[listener.go<br/>TCP server & request dispatcher]
     B --> F[broker.go<br/>Multi-topic log registry]
     B --> G[log.go<br/>Log write / append / read]
+    B --> H[pool.go<br/>TCP connection pool for peers]
     E --> I[segment.go<br/>Log segment files on disk]
     F --> I
     G --> I
@@ -55,26 +70,28 @@ flowchart TD
 | File | Role |
 |---|---|
 | `main.go` | CLI flag parsing, node instantiation |
-| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` for graceful teardown, `saveStates()`/`loadStates()` binary persistence |
+| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` graceful teardown, `saveStates()`/`loadStates()` binary persistence, `compactMemory()` entry cap at 1000 |
 | `heartbeat.go` | Leader sends heartbeats to peers over TCP |
 | `election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`) |
 | `listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
-| `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence |
-| `log.go` | Per-topic log manager (`Log` struct), write/append/read functions, wire-level log transmission, and disk log file management |
+| `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence with atomic tmp+rename |
+| `log.go` | Per-topic log manager (`Log` struct), batch write/append/read functions, wire-level log transmission, CRC32-checksummed disk format, buffered batched I/O with `sync.Pool` |
 | `segment.go` | Representation of individual `.log` data files (max 1MB) |
 | `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
+| `pool.go` | `ConnPool` struct — cached TCP connections to peers with lazy creation and eviction |
 
 ## Node State
 
 ```go
 type Entry struct {
     timestamp int64
-    payload   string
+    payload   []byte
     term      int32
 }
 
 type Node struct {
     port        int16
+    peers       []int16
     role        string          // "Follower", "Candidate", or "Leader"
     currentTerm int32
     votedFor    int16
@@ -89,11 +106,11 @@ type Node struct {
     nextIndex   map[int16]int32 // for each server, index of the next log entry to send
     matchIndex  map[int16]int32 // for each server, index of highest log entry known to be replicated
 
-    broker *Broker   // multi-topic log registry
-
-    listener        net.Listener  // TCP listener handle (used by Shutdown)
-    heartbeatTicker *time.Ticker  // underlying ticker (used by Shutdown)
-    stopCh          chan struct{} // closed to signal all goroutines to exit
+    broker          *Broker     // multi-topic log registry
+    listener        net.Listener
+    heartbeatTicker *time.Ticker
+    stopCh          chan struct{}
+    connPool        *ConnPool    // cached TCP connections to peers
 
     mu sync.Mutex // protects node state access
 }
@@ -119,6 +136,17 @@ The main loop runs in `node.go` and multiplexes on three channels:
 | `heartbeat` | Every 5 seconds | If **Leader**, broadcast `Heartbeat()` to all peers |
 | `electionTimer.C` | After random timeout (8–18s) | If not Leader, call `StartElection()` |
 | `stopCh` | On `Shutdown()` | Exit the loop and clean up |
+
+## Peer Connection Pool (`ConnPool`)
+
+`pool.go` provides a `ConnPool` that lazily creates and caches TCP connections to peer nodes, avoiding the cost of a fresh `net.Dial` on every heartbeat or replication round.
+
+| Method | Behaviour |
+|---|---|
+| `GetOrCreateConnection(port)` | Returns a cached connection for the given peer port, or dials one and caches it |
+| `Evict(port)` | Closes and removes a stale connection on I/O errors |
+
+The pool is used by `Heartbeat()` and by `Log.Write()` during leader replication. On dial or read/write failures the caller evicts the connection so the next attempt re-dials.
 
 ## Wire Protocol
 
@@ -148,7 +176,7 @@ Response frames consist of a single 2-byte status/response code.
 
 #### Client Produce (`0x0006`)
 
-Supports batching — up to 100 entries per request.
+Supports batching — up to 100 entries per request. All entries in a batch are written to disk in a single I/O call.
 
 | Field | Size | Description |
 |---|---|---|
@@ -280,22 +308,27 @@ Log persistence is segmented, with accompanying index files to optimize retrieva
 
    | Field | Size |
    |---|---|
+   | crc32 | 4B |
    | timestamp | 8B |
    | payloadLen | 4B |
    | payload | `payloadLen` bytes |
 
-4. **Startup recovery** — on startup, a node creates per-topic directories under `data/<port>/log/<topic>/`. In-memory entry recovery from disk segments is not yet re-implemented for the multi-topic layout.
+   The 4-byte CRC32 checksum covers the entry payload and is verified on read — entries with mismatched checksums return a corruption error.
+4. **Batch writes** — `writeToDisk` accepts multiple entries in a single call and encodes them into one pre-allocated buffer from a shared `sync.Pool`, reducing heap allocations. The companion index entries are also written in one batch.
+5. **File descriptor cache** — the `Log` maintains an `fdCache` mapping index and segment paths to open `*os.File` handles, avoiding redundant `os.Open` calls during consumer reads.
+6. **Startup recovery** — on startup, a node creates per-topic directories under `data/<port>/log/<topic>/`. In-memory entry recovery from disk segments is not yet re-implemented for the multi-topic layout.
 
 ## Graceful Shutdown
 
 `node.Shutdown()` persists volatile state and exits immediately:
 
 1. Locks the node mutex and calls `saveStates()` to persist `currentTerm` and `votedFor` to disk.
-2. Locks the broker mutex and writes the consumer-group offset map to `data/<port>/offsets_snapshot.json`.
+2. The `saveSnapshot` goroutine (launched in `NewNode`) also writes a final snapshot on `stopCh` before exiting.
 3. Calls `os.Exit(0)` — the process terminates immediately regardless of any in-flight goroutines.
 
 ## Current Limitations & Future Improvements
 
-- **In-memory volatile metadata** — `currentTerm` and `votedFor` are persisted on every state change, but in-memory log entries (`[]Entry`) are not yet recovered from disk segments on restart.
-- **No RPC retry** — dial failures are logged but silently skipped.
-- **Single-response produce** — the server sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished.
+- **In-memory log entries not recovered** — log entries (`[]Entry`) are not recovered from disk segments on restart; the in-memory log starts empty.
+- **Memory cap** — `compactMemory()` keeps `node.entries` at most 1000 entries. This prevents unbounded growth but means only recent history is available in memory for replication.
+- **No RPC retry** — dial failures are logged but silently skipped; the caller evicts the connection from the pool on error.
+- **Single-response produce** — the leader sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished. A 6-second timeout goroutine fires if a majority ack is never reached.

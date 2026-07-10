@@ -10,3 +10,6 @@ stress/
 client/kafka
 *.py
 data
+
+# personal notes
+docs/*.md

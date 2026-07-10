@@ -15,12 +15,14 @@ func (node *Node) Heartbeat() {
 		conn, err := node.connPool.GetOrCreateConnection(port)
 		if err != nil {
 			fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
+			node.connPool.Evict(port)
 			continue
 		}
 		conn.SetDeadline(time.Now().Add(5 * time.Second))
 		err = sendHeartbeat(node.port, node.currentTerm, conn)
 		if err != nil {
 			fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
+			node.connPool.Evict(port)
 		}
 	}
 }

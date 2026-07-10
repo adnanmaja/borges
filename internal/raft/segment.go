@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"sync"
@@ -14,11 +15,13 @@ type Segment struct {
 	maxSize     int64
 	firstOffset int64
 	timestamp   int64
+	writer      *bufio.Writer
 	mu          sync.Mutex
 }
 
 func (s *Segment) Close() error {
 	s.mu.Lock()
+	s.writer.Flush()
 	defer s.mu.Unlock()
 	return s.file.Close()
 }
@@ -49,5 +52,6 @@ func NewSegment(port int16, offset int64, topic string) *Segment {
 		maxSize:     1 * 1024 * 1024,
 		firstOffset: offset,
 		timestamp:   time.Now().UnixMilli(),
+		writer:      bufio.NewWriterSize(file, 65536),
 	}
 }

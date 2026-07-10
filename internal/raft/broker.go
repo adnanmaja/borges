@@ -22,10 +22,16 @@ func NewBroker() *Broker {
 }
 
 func (b *Broker) GetOrCreateLog(topic string, port int16) *Log {
+	b.mu.RLock()
+	log, exists := b.logs[topic]
+	b.mu.RUnlock()
+	if exists {
+		return log
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	log, exists := b.logs[topic]
+	log, exists = b.logs[topic]
 	if !exists {
 		log = NewLog(port, topic)
 		b.logs[topic] = log

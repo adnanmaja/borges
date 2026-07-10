@@ -38,3 +38,12 @@ func (c *ConnPool) GetOrCreateConnection(port int16) (net.Conn, error) {
 	return conn, nil
 
 }
+
+func (c *ConnPool) Evict(port int16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if conn, ok := c.connections[port]; ok {
+		conn.Close()
+		delete(c.connections, port)
+	}
+}

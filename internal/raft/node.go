@@ -39,6 +39,7 @@ type Node struct {
 	listener        net.Listener
 	heartbeatTicker *time.Ticker
 	stopCh          chan struct{}
+	connPool        *ConnPool
 
 	mu sync.Mutex
 }
@@ -71,6 +72,7 @@ func NewNode(port int16, peers []int16) *Node {
 		os.MkdirAll(fmt.Sprintf("data/%d/log", p), 0755)
 	}
 
+	node.connPool = NewPool()
 	node.broker = NewBroker()
 	node.loadStates()
 	go node.broker.saveSnapshot(node.port, node.stopCh)

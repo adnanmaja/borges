@@ -47,10 +47,10 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			break
 		}
 		opcode := binary.BigEndian.Uint16(opcodeBuf)
-		fmt.Println("opcode:", opcode)
+		// fmt.Println("opcode:", opcode)
 
 		switch opcode {
-		case 0x0004:
+		case 0x0004: // leader's heartbeat
 			from, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -66,7 +66,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			fmt.Printf("[HEARTBEAT] from %d (term %d)\n", from, term)
 			node.resetElectionTimer(term)
 
-		case 0x0005:
+		case 0x0005: // candidate's vote request
 			sender, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -93,7 +93,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			} else {
 				responseFail(conn)
 			}
-		case 0x0006:
+		case 0x0006: //produce
 			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -105,8 +105,6 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				fmt.Println("error:", err)
 				break
 			}
-
-			fmt.Println("[DEBUG] topic:", topic)
 
 			entriesCount, err := readInt32(conn)
 			if err != nil {
@@ -144,7 +142,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				responseFail(conn)
 			}
 
-		case 0x0007:
+		case 0x0007: // leader's apeendLog request
 			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -222,7 +220,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				responseFail(conn)
 			}
 
-		case 0x0008:
+		case 0x0008: // consume
 			_, err := readInt16(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -268,7 +266,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				conn.Write([]byte(entry.payload))
 			}
 
-		case 0x0009:
+		case 0x0009: // commit offset
 			groupIdLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)
@@ -298,7 +296,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 			responseSuccess(conn)
 
-		case 0x0010:
+		case 0x0010: // fetch offset
 			groupIdLen, err := readInt32(conn)
 			if err != nil {
 				fmt.Println("error:", err)

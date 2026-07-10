@@ -26,9 +26,9 @@ Nodes start as Followers, hold Elections when a leader goes quiet, and once a Le
 Open three terminals and run one instance on each port:
 
 ```bash
-go run . -port 8080
-go run . -port 8081
-go run . -port 8082
+go run . -port 8080 -peers 8081,8082
+go run . -port 8081 -peers 8080,8082
+go run . -port 8082 -peers 8080,8081
 ```
 
 All nodes start as **Follower**. The first node to time out and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.

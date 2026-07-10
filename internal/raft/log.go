@@ -152,7 +152,7 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 	var successCount int32 = 1
 	var wg sync.WaitGroup
 
-	fmt.Println("[LOG] Appending the log entry:", string(entry))
+	// fmt.Println("[LOG] Appending the log entry:", string(entry))
 
 	if node.role == "Leader" {
 		for _, port := range node.peers {
@@ -173,15 +173,15 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 					topic:        l.topic,
 				}
 
-				conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", p), 5*time.Second)
+				conn, err := node.connPool.GetOrCreateConnection(p)
 				if err != nil {
-					fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
+					fmt.Printf("[LOG] cannot connect %d: %s\n", p, err)
 					return
 				}
+
 				conn.SetDeadline(time.Now().Add(5 * time.Second))
-				fmt.Println("[LOG] Sending append log entries")
+				// fmt.Println("[LOG] Sending append log entries")
 				ok, success, err := sendAppendEntries(conn, logMsg)
-				conn.Close()
 				if err != nil {
 					fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
 					return
@@ -240,7 +240,7 @@ func (l *Log) Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, en
 	for _, entry := range entries {
 		node.entries = append(node.entries, entry)
 		l.writeToDisk(entry, node)
-		fmt.Println("[LOG] Appending the log entry:", string(entry.payload))
+		// fmt.Println("[LOG] Appending the log entry")
 	}
 
 	if leaderCommit > node.commitIndex {

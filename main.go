@@ -32,6 +32,8 @@ func main() {
 	}
 
 	node := raft.NewNode(int16(*port), allPorts)
+	pid := os.Getpid()
+	fmt.Printf("PID: %d\n", pid)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

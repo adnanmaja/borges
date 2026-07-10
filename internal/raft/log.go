@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -145,31 +144,49 @@ func (l *Log) prepareSegment(size int64, port int16) (*Segment, int64) {
 	return l.activeSegment, writeOffset
 }
 
-func (l *Log) Write(entry []byte, node *Node) bool {
-	node.entries = append(node.entries, Entry{timestamp: time.Now().UnixMilli(), payload: string(entry), term: node.currentTerm})
-	l.writeToDisk(node.entries[len(node.entries)-1], node)
+func (l *Log) Write(payloads [][]byte, node *Node) bool {
+	var peerCount int
+	for _, port := range node.peers {
+		if port != node.port {
+			peerCount++
+		}
+	}
 
-	var successCount int32 = 1
-	var wg sync.WaitGroup
-
-	// fmt.Println("[LOG] Appending the log entry:", string(entry))
+	ackChan := make(chan bool, peerCount)
 
 	if node.role == "Leader" {
+		prevLen := len(node.entries)
+		for _, payload := range payloads {
+			node.entries = append(node.entries, Entry{timestamp: time.Now().UnixMilli(), payload: payload, term: node.currentTerm})
+		}
+
+		if len(node.entries) > 1000 {
+			node.compactMemory()
+		}
+
+		l.writeToDisk(node.entries[prevLen:], node)
+
 		for _, port := range node.peers {
 			if port == node.port {
 				continue
 			}
-			wg.Add(1)
-			go func(p int16) {
-				defer wg.Done()
+
+			node.mu.Lock()
+			pNextIdx := node.nextIndex[port]
+			prevLogIndex := pNextIdx - 1
+			prevLogTerm := node.entries[prevLogIndex].term
+			entriesToSend := node.entries[pNextIdx:]
+			node.mu.Unlock()
+
+			go func(p int16, prevIdx int32, prevTerm int32, entries []Entry) {
 
 				logMsg := appendLogMsg{
 					leaderTerm:   node.currentTerm,
 					leaderPort:   node.port,
-					prevLogIndex: node.nextIndex[p] - 1,
-					prevLogTerm:  node.entries[node.nextIndex[p]-1].term,
+					prevLogIndex: prevIdx,
+					prevLogTerm:  prevTerm,
 					commitIndex:  node.commitIndex,
-					entries:      node.entries[node.nextIndex[p]:],
+					entries:      entries,
 					topic:        l.topic,
 				}
 
@@ -180,7 +197,6 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 				}
 
 				conn.SetDeadline(time.Now().Add(5 * time.Second))
-				// fmt.Println("[LOG] Sending append log entries")
 				ok, success, err := sendAppendEntries(conn, logMsg)
 				if err != nil {
 					fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
@@ -188,29 +204,41 @@ func (l *Log) Write(entry []byte, node *Node) bool {
 				}
 
 				if ok && success {
-					atomic.AddInt32(&successCount, 1)
-
 					node.mu.Lock()
-					node.matchIndex[p] = logMsg.prevLogIndex + int32(len(logMsg.entries))
+					node.matchIndex[p] = prevIdx + int32(len(entries))
 					node.nextIndex[p] = node.matchIndex[p] + 1
 					node.mu.Unlock()
+					ackChan <- true
 
-				} else if ok && !success {
-					node.mu.Lock()
-					node.nextIndex[p]--
-					node.mu.Unlock()
-
-					if node.nextIndex[p] < 1 {
-						node.nextIndex[p] = 1
+				} else {
+					if ok && !success {
+						node.mu.Lock()
+						node.nextIndex[p]--
+						if node.nextIndex[p] < 1 {
+							node.nextIndex[p] = 1
+						}
+						node.mu.Unlock()
 					}
+					ackChan <- false
 				}
-			}(port)
+			}(port, prevLogIndex, prevLogTerm, entriesToSend)
 
 		}
-		wg.Wait()
-		if successCount > int32(len(node.peers)/2) {
-			node.commitIndex = int32(len(node.entries) - 1)
-			return true
+
+		successCount := 1
+		majority := len(node.peers)/2 + 1
+
+		for i := 0; i < peerCount; i++ {
+			if <-ackChan {
+				successCount++
+			}
+
+			if successCount >= majority {
+				node.mu.Lock()
+				node.commitIndex = int32(len(node.entries) - 1)
+				node.mu.Unlock()
+				return true
+			}
 		}
 	}
 	return false
@@ -237,11 +265,12 @@ func (l *Log) Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, en
 
 	node.entries = node.entries[:prevLogIdx+1]
 
+	prevLen := len(node.entries)
 	for _, entry := range entries {
 		node.entries = append(node.entries, entry)
-		l.writeToDisk(entry, node)
-		// fmt.Println("[LOG] Appending the log entry")
 	}
+
+	l.writeToDisk(node.entries[prevLen:], node)
 
 	if leaderCommit > node.commitIndex {
 		node.commitIndex = min(leaderCommit, int32(len(node.entries)-1))
@@ -282,14 +311,11 @@ func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 	}
 
 	for i := 0; i < entriesCount; i++ {
-		timestampFrame := make([]byte, 8)
-		binary.BigEndian.PutUint64(timestampFrame, uint64(logMsg.entries[i].timestamp))
-		conn.Write(timestampFrame)
-		entryLen := make([]byte, 4)
-		binary.BigEndian.PutUint32(entryLen, uint32(len(logMsg.entries[i].payload)))
-		conn.Write(entryLen)
-		payload := logMsg.entries[i].payload
-		conn.Write([]byte(payload))
+		payloadFrame := make([]byte, 12+len(logMsg.entries[i].payload))
+		binary.BigEndian.PutUint64(payloadFrame[0:8], uint64(logMsg.entries[i].timestamp))
+		binary.BigEndian.PutUint32(payloadFrame[8:12], uint32(len(logMsg.entries[i].payload)))
+		copy(payloadFrame[12:], logMsg.entries[i].payload)
+		conn.Write(payloadFrame)
 	}
 
 	responseFrame := make([]byte, 2)
@@ -309,42 +335,57 @@ func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 	return false, false, nil
 }
 
-func (l *Log) writeToDisk(entry Entry, node *Node) {
+func (l *Log) writeToDisk(entries []Entry, node *Node) {
+	// each entry on disk: [4B CRC32][8B timestamp][4B payload len][payload]
 	bufPtr := writeBufferPool.Get().(*[]byte)
 	buf := *bufPtr
 
-	totalSize := 4 + 8 + 4 + len(entry.payload)
+	totalSize := 0
+	for _, entry := range entries {
+		totalSize += 4 + 8 + 4 + len(entry.payload)
+	}
+
+	if totalSize > len(buf) {
+		buf = make([]byte, totalSize)
+	}
 	writeBuf := buf[:totalSize]
 	off := 0
 
-	checksum := crc32.ChecksumIEEE([]byte(entry.payload))
-	binary.BigEndian.PutUint32(writeBuf[off:], checksum)
-	off += 4
-	binary.BigEndian.PutUint64(writeBuf[off:], uint64(entry.timestamp))
-	off += 8
-	binary.BigEndian.PutUint32(writeBuf[off:], uint32(len(entry.payload)))
-	off += 4
+	for _, entry := range entries {
+		checksum := crc32.ChecksumIEEE(entry.payload)
+		binary.BigEndian.PutUint32(writeBuf[off:], checksum)
+		off += 4
+		binary.BigEndian.PutUint64(writeBuf[off:], uint64(entry.timestamp))
+		off += 8
+		binary.BigEndian.PutUint32(writeBuf[off:], uint32(len(entry.payload)))
+		off += 4
 
-	copy(writeBuf[off:], []byte(entry.payload))
+		copy(writeBuf[off:], entry.payload)
+		off += len(entry.payload)
+	}
 
 	l.mu.Lock()
 	segment, _ := l.prepareSegment(int64(totalSize), node.port)
 
-	segment.mu.Lock()
+	{
+		currentOffset := l.nextOffset
+		for _, entry := range entries {
+			entrySize := int64(4 + 8 + 4 + len(entry.payload))
+			l.activeIndex.WriteIndex(currentOffset, entrySize)
+			currentOffset++
+		}
+		l.nextOffset += int64(len(entries))
+	}
+
+	l.mu.Unlock()
+
 	_, err := segment.file.Write(writeBuf)
-	segment.mu.Unlock()
 	if err != nil {
-		l.mu.Unlock()
 		writeBufferPool.Put(bufPtr)
 		panic("writeToDisk failed")
 	}
 
-	l.activeIndex.WriteIndex(l.nextOffset, int64(totalSize))
-	l.nextOffset++
-	l.mu.Unlock()
-
 	writeBufferPool.Put(bufPtr)
-
 }
 
 func (l *Log) findIndexFile(relativeOffset int64, port int16) string {
@@ -433,7 +474,7 @@ func (l *Log) Read(startOffset int64, node *Node, sizeLimit int32) ([]Entry, err
 		entries = append(entries, Entry{
 			term:      node.currentTerm,
 			timestamp: int64(timestamp),
-			payload:   string(payloadBuf),
+			payload:   payloadBuf,
 		})
 
 		startOffset++

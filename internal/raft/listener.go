@@ -119,8 +119,9 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			var ok bool
 			log := node.broker.GetOrCreateLog(topic, node.port)
+
+			var payloads [][]byte
 			for range entriesCount {
 				payloadLen, err := readInt32(conn)
 				if err != nil {
@@ -133,9 +134,10 @@ func (node *Node) listenForMessage(conn net.Conn) {
 					fmt.Println("error:", err)
 					break
 				}
-				ok = log.Write(payload, node)
+				payloads = append(payloads, payload)
 			}
 
+			ok := log.Write(payloads, node)
 			if ok {
 				responseSuccess(conn)
 			} else {
@@ -207,7 +209,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 				entries = append(entries, Entry{
 					timestamp: timestamp,
-					payload:   string(payload),
+					payload:   payload,
 					term:      int32(leaderTerm),
 				})
 			}
@@ -357,15 +359,6 @@ func readInt64(conn net.Conn) (int64, error) {
 	}
 
 	return int64(binary.BigEndian.Uint64(buf)), nil
-}
-
-func parseHeartbeat(conn net.Conn) ([]byte, error) {
-	buf := make([]byte, 10)
-	if err := readFull(conn, buf); err != nil {
-		return []byte{}, err
-	}
-
-	return buf, nil
 }
 
 func readFull(conn net.Conn, buf []byte) error {

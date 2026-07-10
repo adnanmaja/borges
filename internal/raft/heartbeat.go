@@ -12,14 +12,13 @@ func (node *Node) Heartbeat() {
 		if port == node.port {
 			continue
 		}
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 5*time.Second)
+		conn, err := node.connPool.GetOrCreateConnection(port)
 		if err != nil {
 			fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
 			continue
 		}
 		conn.SetDeadline(time.Now().Add(5 * time.Second))
 		err = sendHeartbeat(node.port, node.currentTerm, conn)
-		conn.Close()
 		if err != nil {
 			fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
 		}

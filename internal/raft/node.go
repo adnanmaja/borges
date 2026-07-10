@@ -14,7 +14,7 @@ import (
 
 type Entry struct {
 	timestamp int64
-	payload   string
+	payload   []byte
 	term      int32
 }
 
@@ -61,7 +61,7 @@ func NewNode(port int16, peers []int16) *Node {
 		voteCount:       0,
 		lastHeartbeat:   time.Now(),
 		entries: []Entry{
-			0: {payload: "", term: 0},
+			0: {payload: nil, term: 0},
 		},
 		commitIndex: 0,
 		nextIndex:   make(map[int16]int32),
@@ -179,4 +179,16 @@ func (node *Node) loadStates() {
 
 	node.currentTerm = int32(currentTerm)
 	node.votedFor = int16(votedFor)
+}
+
+func (node *Node) compactMemory() {
+	maxEntries := 1000
+
+	if len(node.entries) > maxEntries {
+		keepFrom := len(node.entries) - maxEntries
+
+		newEntries := make([]Entry, maxEntries)
+		copy(newEntries, node.entries[keepFrom:])
+		node.entries = newEntries
+	}
 }

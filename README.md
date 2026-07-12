@@ -70,9 +70,9 @@ flowchart TD
 | File | Role |
 |---|---|
 | `main.go` | CLI flag parsing, node instantiation |
-| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` graceful teardown, `saveStates()`/`loadStates()` binary persistence, `compactMemory()` entry cap at 1000 |
-| `heartbeat.go` | Leader sends heartbeats to peers over TCP |
-| `election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`) |
+| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` graceful teardown, `saveStates()`/`loadStates()` binary persistence, `compactMemory()` entry cap at 1000, `snapshotEntries()`/`loadEntrySnapshot()` JSON entry persistence |
+| `heartbeat.go` | Leader sends heartbeats to peers over TCP (with 1 retry on failure) |
+| `election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`), vote request retry |
 | `listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
 | `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence with atomic tmp+rename |
 | `log.go` | Per-topic log manager (`Log` struct), batch write/append/read functions, wire-level log transmission, CRC32-checksummed disk format, buffered batched I/O with `sync.Pool` |
@@ -289,7 +289,11 @@ Response:
 
 ### Offset snapshot (`saveSnapshot` / `loadSnapshot`)
 
-The `Broker`'s consumer-group offset map is persisted periodically (every 10s) to `data/<port>/offsets_snapshot.json` by the `broker.saveSnapshot` goroutine launched from `NewNode`.
+The `Broker`'s consumer-group offset map is persisted periodically (every 10s) to `data/<port>/offset_snapshot.json` by the `broker.saveSnapshot` goroutine launched from `NewNode`.
+
+### Entry snapshot (`snapshotEntries` / `loadEntrySnapshot`)
+
+`node.entries` (the in-memory Raft log) is persisted periodically (every 10s) to `data/<port>/entry_snapshot.json` by the `node.snapshotEntries` goroutine launched from `NewNode`. On restart, `loadEntrySnapshot` recovers these entries so the Raft log's term history is preserved for consistency checks during log replication. The snapshot is also written during `Shutdown` to minimise data loss.
 
 ## Log Persistence (WAL & Indexing)
 
@@ -316,19 +320,17 @@ Log persistence is segmented, with accompanying index files to optimize retrieva
    The 4-byte CRC32 checksum covers the entry payload and is verified on read — entries with mismatched checksums return a corruption error.
 4. **Batch writes** — `writeToDisk` accepts multiple entries in a single call and encodes them into one pre-allocated buffer from a shared `sync.Pool`, reducing heap allocations. The companion index entries are also written in one batch.
 5. **File descriptor cache** — the `Log` maintains an `fdCache` mapping index and segment paths to open `*os.File` handles, avoiding redundant `os.Open` calls during consumer reads.
-6. **Startup recovery** — on startup, a node creates per-topic directories under `data/<port>/log/<topic>/`. In-memory entry recovery from disk segments is not yet re-implemented for the multi-topic layout.
+6. **Startup recovery** — on startup, a node creates per-topic directories under `data/<port>/log/<topic>/`. The in-memory Raft log (`node.entries`) is recovered from `data/<port>/entry_snapshot.json` (see [Entry snapshot](#entry-snapshot-snapshotentries--loadentrysnapshot)), preserving term history for Raft consistency checks.
 
 ## Graceful Shutdown
 
 `node.Shutdown()` persists volatile state and exits immediately:
 
-1. Locks the node mutex and calls `saveStates()` to persist `currentTerm` and `votedFor` to disk.
-2. The `saveSnapshot` goroutine (launched in `NewNode`) also writes a final snapshot on `stopCh` before exiting.
+1. Locks the node mutex, calls `saveStates()` to persist `currentTerm` and `votedFor`, and writes the entry snapshot (`node.entries`) to `entry_snapshot.json`.
+2. Writes a final offsets snapshot to `offset_snapshot.json`.
 3. Calls `os.Exit(0)` — the process terminates immediately regardless of any in-flight goroutines.
 
 ## Current Limitations & Future Improvements
 
-- **In-memory log entries not recovered** — log entries (`[]Entry`) are not recovered from disk segments on restart; the in-memory log starts empty.
 - **Memory cap** — `compactMemory()` keeps `node.entries` at most 1000 entries. This prevents unbounded growth but means only recent history is available in memory for replication.
-- **No RPC retry** — dial failures are logged but silently skipped; the caller evicts the connection from the pool on error.
 - **Single-response produce** — the leader sends one success/failure response after the entire batch is processed; partial batch failures are not distinguished. A 6-second timeout goroutine fires if a majority ack is never reached.

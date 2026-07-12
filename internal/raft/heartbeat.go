@@ -12,16 +12,28 @@ func (node *Node) Heartbeat() {
 		if port == node.port {
 			continue
 		}
-		conn, err := node.connPool.GetOrCreateConnection(port)
-		if err != nil {
-			fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
-			node.connPool.Evict(port)
-			continue
+
+		var err error
+		for attempt := 0; attempt < 2; attempt++ {
+			if attempt > 0 {
+				node.connPool.Evict(port)
+				time.Sleep(100 * time.Millisecond)
+			}
+
+			var conn net.Conn
+			conn, err = node.connPool.GetOrCreateConnection(port)
+			if err != nil {
+				continue
+			}
+			conn.SetDeadline(time.Now().Add(5 * time.Second))
+			err = sendHeartbeat(node.port, node.currentTerm, conn)
+			if err != nil {
+				continue
+			}
+			break
 		}
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
-		err = sendHeartbeat(node.port, node.currentTerm, conn)
 		if err != nil {
-			fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
+			fmt.Printf("[HEARTBEAT] cannot reach %d after retry: %s\n", port, err)
 			node.connPool.Evict(port)
 		}
 	}

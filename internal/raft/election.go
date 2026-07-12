@@ -33,17 +33,29 @@ func (node *Node) StartElection() {
 			}
 			lastLogIndex := len(node.entries) - 1
 			lastLogTerm := node.entries[lastLogIndex].term
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 5*time.Second)
-			if err != nil {
-				fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
-				continue
+
+			var granted bool
+			var err error
+			for attempt := 0; attempt < 2; attempt++ {
+				if attempt > 0 {
+					time.Sleep(100 * time.Millisecond)
+				}
+
+				var conn net.Conn
+				conn, err = net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 5*time.Second)
+				if err != nil {
+					continue
+				}
+				conn.SetDeadline(time.Now().Add(5 * time.Second))
+				granted, err = sendVoteRequest(conn, node.port, node.currentTerm, int32(lastLogIndex), lastLogTerm)
+				conn.Close()
+				if err != nil {
+					continue
+				}
+				break
 			}
-			conn.SetDeadline(time.Now().Add(5 * time.Second))
-			fmt.Println("[ELECTION] Everybody please vote for me")
-			granted, err := sendVoteRequest(conn, node.port, node.currentTerm, int32(lastLogIndex), lastLogTerm)
-			conn.Close()
 			if err != nil {
-				fmt.Printf("[ELECTION] cannot reach %d: %s\n", port, err)
+				fmt.Printf("[ELECTION] cannot reach %d after retry: %s\n", port, err)
 				continue
 			}
 			if granted {

@@ -18,6 +18,28 @@ type Entry struct {
 	term      int32
 }
 
+type entrySnapshot struct {
+	Timestamp int64  `json:"ts"`
+	Payload   []byte `json:"data"`
+	Term      int32  `json:"term"`
+}
+
+func toEntrySnapshots(entries []Entry) []entrySnapshot {
+	snap := make([]entrySnapshot, len(entries))
+	for i, e := range entries {
+		snap[i] = entrySnapshot{Timestamp: e.timestamp, Payload: e.payload, Term: e.term}
+	}
+	return snap
+}
+
+func fromEntrySnapshots(snap []entrySnapshot) []Entry {
+	entries := make([]Entry, len(snap))
+	for i, s := range snap {
+		entries[i] = Entry{timestamp: s.Timestamp, payload: s.Payload, term: s.Term}
+	}
+	return entries
+}
+
 type Node struct {
 	port        int16
 	peers       []int16
@@ -71,6 +93,11 @@ func NewNode(port int16, peers []int16) *Node {
 	for _, p := range peers {
 		os.MkdirAll(fmt.Sprintf("data/%d/log", p), 0755)
 	}
+	err := node.loadEntrySnapshot()
+	if err != nil {
+		fmt.Println("error loading entry snapshot:", err)
+	}
+	go node.snapshotEntries(node.stopCh)
 
 	node.connPool = NewPool()
 	node.broker = NewBroker()
@@ -121,13 +148,20 @@ func (node *Node) Shutdown() {
 
 	node.mu.Lock()
 	node.saveStates()
+
+	snap := toEntrySnapshots(node.entries[1:])
+	data, err := json.Marshal(snap)
 	node.mu.Unlock()
+	if err == nil {
+		os.WriteFile(fmt.Sprintf("data/%d/entry_snapshot.json", node.port), data, 0644)
+		fmt.Println("[SHUTDOWN] entry snapshot saved")
+	}
 
 	node.broker.mu.Lock()
-	data, err := json.Marshal(node.broker.offsets)
+	data, err = json.Marshal(node.broker.offsets)
 	node.broker.mu.Unlock()
 	if err == nil {
-		snapshotPath := fmt.Sprintf("data/%d/offsets_snapshot.json", node.port)
+		snapshotPath := fmt.Sprintf("data/%d/offset_snapshot.json", node.port)
 		os.WriteFile(snapshotPath, data, 0644)
 	}
 
@@ -191,4 +225,73 @@ func (node *Node) compactMemory() {
 		copy(newEntries, node.entries[keepFrom:])
 		node.entries = newEntries
 	}
+}
+
+func (node *Node) snapshotEntries(stopCh <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			node.mu.Lock()
+			snap := toEntrySnapshots(node.entries[1:])
+			node.mu.Unlock()
+
+			data, err := json.Marshal(snap)
+			if err != nil {
+				fmt.Println("error marshaling:", err)
+				continue
+			}
+
+			snapshotPath := fmt.Sprintf("data/%d/entry_snapshot.json", node.port)
+			tmpPath := snapshotPath + ".tmp"
+			err = os.WriteFile(tmpPath, data, 0644)
+			if err != nil {
+				fmt.Println("error writefile:", err)
+				continue
+			}
+			os.Rename(tmpPath, snapshotPath)
+
+		case <-stopCh:
+			node.mu.Lock()
+			snap := toEntrySnapshots(node.entries[1:])
+			node.mu.Unlock()
+
+			data, err := json.Marshal(snap)
+			if err != nil {
+				fmt.Println("error marshaling:", err)
+				return
+			}
+
+			os.WriteFile(fmt.Sprintf("data/%d/entry_snapshot.json", node.port), data, 0644)
+			fmt.Println("[SHUTDOWN] entry snapshot saved")
+			return
+		}
+	}
+}
+
+func (node *Node) loadEntrySnapshot() error {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	snapshotPath := fmt.Sprintf("data/%d/entry_snapshot.json", node.port)
+
+	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
+		node.entries = []Entry{0: {payload: nil, term: 0}}
+		return nil
+	}
+
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return err
+	}
+
+	var snap []entrySnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return err
+	}
+
+	node.entries = append([]Entry{{payload: nil, term: 0}}, fromEntrySnapshots(snap)...)
+	return nil
 }

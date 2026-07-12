@@ -196,17 +196,29 @@ func (l *Log) Write(payloads [][]byte, node *Node, conn net.Conn) {
 				topic:        l.topic,
 			}
 
-			pconn, err := node.connPool.GetOrCreateConnection(p)
-			if err != nil {
-				fmt.Printf("[LOG] cannot connect %d: %s\n", p, err)
-				node.connPool.Evict(p)
-				return
-			}
+			var ok, success bool
+			var err error
+			for attempt := 0; attempt < 2; attempt++ {
+				if attempt > 0 {
+					node.connPool.Evict(p)
+					time.Sleep(100 * time.Millisecond)
+				}
 
-			pconn.SetDeadline(time.Now().Add(5 * time.Second))
-			ok, success, err := sendAppendEntries(pconn, logMsg)
+				var pconn net.Conn
+				pconn, err = node.connPool.GetOrCreateConnection(p)
+				if err != nil {
+					continue
+				}
+
+				pconn.SetDeadline(time.Now().Add(5 * time.Second))
+				ok, success, err = sendAppendEntries(pconn, logMsg)
+				if err != nil {
+					continue
+				}
+				break
+			}
 			if err != nil {
-				fmt.Printf("[LOG] cannot reach %d: %s\n", p, err)
+				fmt.Printf("[LOG] cannot reach %d after retry: %s\n", p, err)
 				node.connPool.Evict(p)
 				return
 			}
@@ -346,13 +358,13 @@ func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 }
 
 func (l *Log) writeToDisk(entries []Entry, node *Node) {
-	// each entry on disk: [4B CRC32][8B timestamp][4B payload len][payload]
+	// each entry on disk: [4B CRC32][4B term][8B timestamp][4B payload len][payload]
 	bufPtr := writeBufferPool.Get().(*[]byte)
 	buf := *bufPtr
 
 	totalSize := 0
 	for _, entry := range entries {
-		totalSize += 4 + 8 + 4 + len(entry.payload)
+		totalSize += 4 + 4 + 8 + 4 + len(entry.payload)
 	}
 
 	if totalSize > len(buf) {
@@ -364,6 +376,8 @@ func (l *Log) writeToDisk(entries []Entry, node *Node) {
 	for _, entry := range entries {
 		checksum := crc32.ChecksumIEEE(entry.payload)
 		binary.BigEndian.PutUint32(writeBuf[off:], checksum)
+		off += 4
+		binary.BigEndian.PutUint32(writeBuf[off:], uint32(node.currentTerm))
 		off += 4
 		binary.BigEndian.PutUint64(writeBuf[off:], uint64(entry.timestamp))
 		off += 8
@@ -381,7 +395,7 @@ func (l *Log) writeToDisk(entries []Entry, node *Node) {
 
 	currentOffset := l.nextOffset
 	for _, entry := range entries {
-		entrySize := int64(4 + 8 + 4 + len(entry.payload))
+		entrySize := int64(4 + 4 + 8 + 4 + len(entry.payload))
 		batch = append(batch, indexEntry{currentOffset, entrySize})
 		currentOffset++
 	}
@@ -475,24 +489,25 @@ func (l *Log) Read(startOffset int64, node *Node, sizeLimit int32) ([]Entry, err
 		}
 		payloadLen := binary.BigEndian.Uint32(payloadLenBuf[:])
 
-		entryBuf := make([]byte, 16+payloadLen)
+		entryBuf := make([]byte, 20+payloadLen)
 		_, err = logFile.ReadAt(entryBuf, int64(absOffset))
 		if err != nil {
 			break
 		}
 
 		savedChecksum := binary.BigEndian.Uint32(entryBuf[0:4])
-		timestamp := binary.BigEndian.Uint64(entryBuf[4:12])
-		if savedChecksum != crc32.ChecksumIEEE(entryBuf[16:]) {
+		termAdded := binary.BigEndian.Uint32(entryBuf[4:8])
+		timestamp := binary.BigEndian.Uint64(entryBuf[8:16])
+		if savedChecksum != crc32.ChecksumIEEE(entryBuf[20:]) {
 			return nil, fmt.Errorf("Data corrupt, checksum mismatch")
 		}
 
 		sizeCount += len(entryBuf)
 
 		entries = append(entries, Entry{
-			term:      node.currentTerm,
+			term:      int32(termAdded),
 			timestamp: int64(timestamp),
-			payload:   entryBuf[16:],
+			payload:   entryBuf[20:],
 		})
 
 		startOffset++

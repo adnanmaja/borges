@@ -88,6 +88,7 @@ func (b *Broker) saveSnapshot(port int16, stopCh <-chan struct{}) {
 		select {
 		case <-ticker.C:
 			b.mu.Lock()
+
 			data, err := json.Marshal(b.offsets)
 			b.mu.Unlock()
 			if err != nil {
@@ -95,7 +96,7 @@ func (b *Broker) saveSnapshot(port int16, stopCh <-chan struct{}) {
 				continue
 			}
 
-			snapshotPath := fmt.Sprintf("data/%d/offsets_snapshot.json", port)
+			snapshotPath := fmt.Sprintf("data/%d/offset_snapshot.json", port)
 			tmpPath := snapshotPath + ".tmp"
 
 			err = os.WriteFile(tmpPath, data, 0644)
@@ -115,7 +116,7 @@ func (b *Broker) saveSnapshot(port int16, stopCh <-chan struct{}) {
 				return
 			}
 
-			snapshotPath := fmt.Sprintf("data/%d/offsets_snapshot.json", port)
+			snapshotPath := fmt.Sprintf("data/%d/offset_snapshot.json", port)
 			os.WriteFile(snapshotPath, data, 0644)
 			fmt.Println("[SHUTDOWN] offsets snapshot saved")
 			return
@@ -127,7 +128,7 @@ func (node *Node) loadSnapshot(b *Broker) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	snapshotPath := fmt.Sprintf("data/%d/offsets_snapshot.json", node.port)
+	snapshotPath := fmt.Sprintf("data/%d/offset_snapshot.json", node.port)
 
 	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
 		b.offsets = make(map[string]map[string]int64)

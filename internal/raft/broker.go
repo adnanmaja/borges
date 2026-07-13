@@ -9,34 +9,45 @@ import (
 )
 
 type Broker struct {
-	logs    map[string]*Log
-	offsets map[string]map[string]int64
-	mu      sync.RWMutex
+	partitions map[string]map[int32]*Partition
+	offsets    map[string]map[string]int64
+	mu         sync.RWMutex
 }
 
 func NewBroker() *Broker {
 	return &Broker{
-		logs:    make(map[string]*Log),
-		offsets: make(map[string]map[string]int64),
+		partitions: make(map[string]map[int32]*Partition),
+		offsets:    make(map[string]map[string]int64),
 	}
 }
 
-func (b *Broker) GetOrCreateLog(topic string, port int16) *Log {
+func (b *Broker) GetOrCreatePartition(topic string, partitionId int32, port int16) *Partition {
 	b.mu.RLock()
-	log, exists := b.logs[topic]
-	b.mu.RUnlock()
-	if exists {
-		return log
+	pmap, topicExists := b.partitions[topic]
+	if topicExists {
+		p, exists := pmap[partitionId]
+		if exists {
+			b.mu.RUnlock()
+			return p
+		}
 	}
+	b.mu.RUnlock()
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	log, exists = b.logs[topic]
-	if !exists {
-		log = NewLog(port, topic)
-		b.logs[topic] = log
+
+	pmap, topicExists = b.partitions[topic]
+	if !topicExists {
+		pmap = make(map[int32]*Partition)
+		b.partitions[topic] = pmap
 	}
-	return log
+
+	p, exists := pmap[partitionId]
+	if !exists {
+		p = NewPartition(port, topic, partitionId)
+		pmap[partitionId] = p
+	}
+	return p
 }
 
 func (b *Broker) SaveOffset(groupId, topic string, offset int64) {
@@ -68,9 +79,11 @@ func (b *Broker) Close() error {
 	defer b.mu.Unlock()
 
 	var errs []error
-	for _, log := range b.logs {
-		if err := log.Close(); err != nil {
-			errs = append(errs, err)
+	for _, pmap := range b.partitions {
+		for _, p := range pmap {
+			if err := p.log.Close(); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 

@@ -112,6 +112,12 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
+			partitionId, err := readInt32(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
 			entriesCount, err := readInt32(reader, int32Buf[:])
 			if err != nil {
 				fmt.Println("error:", err)
@@ -125,7 +131,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			log := node.broker.GetOrCreateLog(topic, node.port)
+			log := node.broker.GetOrCreatePartition(topic, partitionId, node.port).log
 
 			var payloads [][]byte
 			for range entriesCount {
@@ -182,6 +188,12 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
+			partitionId, err := readInt32(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
 			entryNum, err := readInt16(reader, int16Buf[:])
 			if err != nil {
 				fmt.Println("error:", err)
@@ -215,7 +227,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				})
 			}
 
-			log := node.broker.GetOrCreateLog(topic, node.port)
+			log := node.broker.GetOrCreatePartition(topic, partitionId, node.port).log
 			ok := log.Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit, entries, node)
 			if ok {
 				responseSuccess(conn)
@@ -236,6 +248,12 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
+			partitionId, err := readInt32(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
 			offsetTarget, err := readInt64(reader, int64Buf[:])
 			if err != nil {
 				fmt.Println("error:", err)
@@ -248,7 +266,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			log := node.broker.GetOrCreateLog(topic, node.port)
+			log := node.broker.GetOrCreatePartition(topic, partitionId, node.port).log
 			entries, err := log.Read(int64(offsetTarget), node, sizeLimit)
 			if err != nil {
 				fmt.Println("error:", err)

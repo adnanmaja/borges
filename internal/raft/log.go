@@ -25,6 +25,7 @@ type Log struct {
 	segmentOffsets []int64
 	nextOffset     int64
 	topic          string
+	partitionId    int32
 
 	fdCache map[string]*os.File
 }
@@ -37,6 +38,7 @@ type appendLogMsg struct {
 	commitIndex  int32
 	entries      []Entry
 	topic        string
+	partitionId  int32
 }
 
 func (l *Log) Close() error {
@@ -74,15 +76,16 @@ var writeBufferPool = sync.Pool{
 	},
 }
 
-func NewLog(port int16, topic string) *Log {
+func NewLog(port int16, topic string, partitionId int32) *Log {
 	l := &Log{
-		topic:   topic,
-		fdCache: make(map[string]*os.File),
+		topic:       topic,
+		partitionId: partitionId,
+		fdCache:     make(map[string]*os.File),
 	}
 
 	var savedOffsets []int64
 
-	files, _ := os.ReadDir(fmt.Sprintf("data/%d/log/%s/", port, topic))
+	files, _ := os.ReadDir(fmt.Sprintf("data/%d/log/%s/%d/", port, topic, partitionId))
 	for _, file := range files {
 		if !file.IsDir() && filepath.Ext(file.Name()) == ".log" {
 			fileName := strings.TrimSuffix(file.Name(), ".log")
@@ -100,8 +103,8 @@ func NewLog(port int16, topic string) *Log {
 
 	latestOffset := l.segmentOffsets[len(l.segmentOffsets)-1]
 
-	l.activeSegment = NewSegment(port, latestOffset, topic)
-	l.activeIndex = NewIndex(port, latestOffset, l.activeSegment.currentSize, topic)
+	l.activeSegment = NewSegment(port, latestOffset, topic, partitionId)
+	l.activeIndex = NewIndex(port, latestOffset, l.activeSegment.currentSize, topic, partitionId)
 
 	entryCount, err := l.activeIndex.EntryCount()
 	if err == nil {
@@ -122,8 +125,8 @@ func (l *Log) prepareSegment(size int64, port int16) (*Segment, int64) {
 		l.segments = append(l.segments, l.activeSegment)
 
 		l.segmentOffsets = append(l.segmentOffsets, l.nextOffset)
-		l.activeSegment = NewSegment(port, l.segmentOffsets[len(l.segmentOffsets)-1], l.topic)
-		l.activeIndex = NewIndex(port, l.segmentOffsets[len(l.segmentOffsets)-1], 0, l.topic)
+		l.activeSegment = NewSegment(port, l.segmentOffsets[len(l.segmentOffsets)-1], l.topic, l.partitionId)
+		l.activeIndex = NewIndex(port, l.segmentOffsets[len(l.segmentOffsets)-1], 0, l.topic, l.partitionId)
 	}
 
 	writeOffset := l.activeSegment.currentSize
@@ -194,6 +197,7 @@ func (l *Log) Write(payloads [][]byte, node *Node, conn net.Conn) {
 				commitIndex:  node.commitIndex,
 				entries:      entries,
 				topic:        l.topic,
+				partitionId:  l.partitionId,
 			}
 
 			var ok, success bool
@@ -292,7 +296,7 @@ func (l *Log) Append(leaderTerm, prevLogIdx, prevLogTerm, leaderCommit int32, en
 }
 
 func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
-	frameSize := 2 + 2 + 4 + 4 + 4 + 4 + 4 + len(logMsg.topic) + 2
+	frameSize := 2 + 2 + 4 + 4 + 4 + 4 + 4 + len(logMsg.topic) + 4 + 2
 	frame := make([]byte, frameSize)
 	off := 0
 
@@ -313,6 +317,9 @@ func sendAppendEntries(conn net.Conn, logMsg appendLogMsg) (bool, bool, error) {
 
 	copy(frame[off:], []byte(logMsg.topic))
 	off += len(logMsg.topic)
+
+	binary.BigEndian.PutUint32(frame[off:], uint32(logMsg.partitionId))
+	off += 4
 
 	entriesCount := len(logMsg.entries)
 	binary.BigEndian.PutUint16(frame[off:], uint16(entriesCount))
@@ -433,7 +440,7 @@ func (l *Log) findIndexFile(relativeOffset int64, port int16) string {
 		return ""
 	}
 
-	return fmt.Sprintf("data/%d/log/%s/%020d.index", port, l.topic, l.segmentOffsets[lo])
+	return fmt.Sprintf("data/%d/log/%s/%d/%020d.index", port, l.topic, l.partitionId, l.segmentOffsets[lo])
 }
 
 func (l *Log) Read(startOffset int64, node *Node, sizeLimit int32) ([]Entry, error) {

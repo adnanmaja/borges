@@ -22,8 +22,8 @@ type indexEntry struct {
 	size      int64
 }
 
-func NewIndex(port int16, offset int64, logSize int64, topic string) *Index {
-	filePath := fmt.Sprintf("data/%d/log/%s/%020d.index", port, topic, offset)
+func NewIndex(port int16, offset int64, logSize int64, topic string, partitionId int32) *Index {
+	filePath := fmt.Sprintf("data/%d/log/%s/%d/%020d.index", port, topic, partitionId, offset)
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {

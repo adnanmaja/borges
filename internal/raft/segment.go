@@ -26,10 +26,10 @@ func (s *Segment) Close() error {
 	return s.file.Close()
 }
 
-func NewSegment(port int16, offset int64, topic string) *Segment {
-	filePath := fmt.Sprintf("data/%d/log/%s/%020d.log", port, topic, offset)
+func NewSegment(port int16, offset int64, topic string, partitionId int32) *Segment {
+	filePath := fmt.Sprintf("data/%d/log/%s/%d/%020d.log", port, topic, partitionId, offset)
 
-	err := os.MkdirAll(fmt.Sprintf("data/%d/log/%s", port, topic), 0755)
+	err := os.MkdirAll(fmt.Sprintf("data/%d/log/%s/%d", port, topic, partitionId), 0755)
 	if err != nil {
 		panic(fmt.Sprintf("log failed: %s", err))
 	}

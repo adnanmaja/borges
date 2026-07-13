@@ -60,7 +60,8 @@ flowchart TD
     B --> G[log.go<br/>Log write / append / read]
     B --> H[pool.go<br/>TCP connection pool for peers]
     E --> I[segment.go<br/>Log segment files on disk]
-    F --> I
+    F --> K[partition.go<br/>Partition wrapper around Log]
+    K --> G
     G --> I
     I --> J[index.go<br/>Index lookup files on disk]
 ```
@@ -76,6 +77,7 @@ flowchart TD
 | `listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
 | `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence with atomic tmp+rename |
 | `log.go` | Per-topic log manager (`Log` struct), batch write/append/read functions, wire-level log transmission, CRC32-checksummed disk format, buffered batched I/O with `sync.Pool` |
+| `partition.go` | Thin wrapper around a `*Log` with a partition ID |
 | `segment.go` | Representation of individual `.log` data files (max 1MB) |
 | `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
 | `pool.go` | `ConnPool` struct — cached TCP connections to peers with lazy creation and eviction |
@@ -184,6 +186,7 @@ Supports batching — up to 100 entries per request. All entries in a batch are 
 | from | 2B | Sender identifier |
 | topicLen | 4B | Length of the topic name |
 | topic | `topicLen` bytes | Topic to write to |
+| partitionId | 4B | Which partition to produce to |
 | entriesCount | 4B | Number of entries in this batch (max 100) |
 | payloadLen | 4B | Length of an entry's payload *(repeated per entry)* |
 | payload | `payloadLen` bytes | Entry value *(repeated per entry)* |
@@ -198,6 +201,7 @@ Supports batching — up to 100 entries per request. All entries in a batch are 
 | commitIdx | 4B | Leader's commit index |
 | topicLen | 4B | Length of the topic name |
 | topic | `topicLen` bytes | Topic these entries belong to |
+| partitionId | 4B | Which partition these entries belong to |
 | entryNum | 2B | Number of entries being sent |
 
 Each of the `entryNum` entry structs is laid out as:
@@ -216,6 +220,7 @@ Request:
 |---|---|---|
 | topicLen | 4B | Length of the topic name |
 | topic | `topicLen` bytes | Topic to consume from |
+| partitionId | 4B | Which partition to read from |
 | startOffset | 8B | Starting relative offset to retrieve from |
 | sizeLimit | 4B | Maximum number of entries to return |
 
@@ -299,7 +304,7 @@ The `Broker`'s consumer-group offset map is persisted periodically (every 10s) t
 
 Log persistence is segmented, with accompanying index files to optimize retrieval:
 
-1. **Log segments** — per-topic log files are stored on disk under `data/<port>/log/<topic>/` as `<offset>.log` files (e.g. `00000000000000000000.log`). Each file represents a segment with a 1MB size limit.
+1. **Log segments** — per-topic log files are stored on disk under `data/<port>/log/<topic>/<partitionId>/` as `<offset>.log` files (e.g. `00000000000000000000.log`). Each partition has its own set of segments, index files, and offset numbering. Each segment file has a 1MB size limit.
 2. **Index files** — each segment has a companion `<offset>.index` file storing 16-byte index entries:
 
    | Field | Size |
@@ -320,7 +325,7 @@ Log persistence is segmented, with accompanying index files to optimize retrieva
    The 4-byte CRC32 checksum covers the entry payload and is verified on read — entries with mismatched checksums return a corruption error.
 4. **Batch writes** — `writeToDisk` accepts multiple entries in a single call and encodes them into one pre-allocated buffer from a shared `sync.Pool`, reducing heap allocations. The companion index entries are also written in one batch.
 5. **File descriptor cache** — the `Log` maintains an `fdCache` mapping index and segment paths to open `*os.File` handles, avoiding redundant `os.Open` calls during consumer reads.
-6. **Startup recovery** — on startup, a node creates per-topic directories under `data/<port>/log/<topic>/`. The in-memory Raft log (`node.entries`) is recovered from `data/<port>/entry_snapshot.json` (see [Entry snapshot](#entry-snapshot-snapshotentries--loadentrysnapshot)), preserving term history for Raft consistency checks.
+6. **Startup recovery** — on startup, a node creates per-topic, per-partition directories under `data/<port>/log/<topic>/<partitionId>/`. The in-memory Raft log (`node.entries`) is recovered from `data/<port>/entry_snapshot.json` (see [Entry snapshot](#entry-snapshot-snapshotentries--loadentrysnapshot)), preserving term history for Raft consistency checks.
 
 ## Graceful Shutdown
 

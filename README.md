@@ -1,6 +1,6 @@
 # Borges
 
-Borges is a minimal, low-level message broker inspired by Apache Kafka, implemented entirely from scratch in Go, with a working Raft consensus layer for leader election and log replication across a cluster.
+Borges is a minimal, low-level message broker inspired by Apache Kafka, implemented entirely from scratch in Go, with a working Raft consensus layer for leader election and log replication across a cluster. Named after the writer Jorge Luis Borges, a huge fan of Franz Kafka
 
 Instead of relying on high-level database or clustering abstractions, this project focuses on the core primitives of distributed event streaming: building an append-only log, managing segment rotation, implementing custom binary wire protocols, structuring efficient index files, and replicating that log consistently across nodes using Raft.
 
@@ -9,6 +9,7 @@ Nodes start as Followers, hold Elections when a leader goes quiet, and once a Le
 ## Contents
 
 - [Getting Started](#getting-started)
+- [Benchmarking](#benchmarking)
 - [Architecture](#architecture)
 - [Node State](#node-state)
 - [Event Loop](#event-loop-startloop)

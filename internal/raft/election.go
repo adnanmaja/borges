@@ -13,7 +13,7 @@ func (node *Node) StartElection() {
 
 		fmt.Printf("[ELECTION] i wanna be the leader! \n")
 
-		if time.Since(node.lastHeartbeat) < 8*time.Second {
+		if time.Since(node.lastHeartbeat) < 3*time.Second {
 			fmt.Println("[ELECTION] leader is alive, stepping down")
 			node.role = "Follower"
 			randSec := 8 + rand.Intn(11)
@@ -102,6 +102,7 @@ func (node *Node) CountVote() {
 
 	if node.voteCount > int32((len(node.peers))/2) {
 		node.role = "Leader"
+		node.currentLeader = node.port
 		fmt.Println("[ELECTION] Im the leader now")
 
 		for _, port := range node.peers {

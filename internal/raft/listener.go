@@ -42,6 +42,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 	var int16Buf [2]byte
 	var int32Buf [4]byte
 	var int64Buf [8]byte
+	var maxEntryCount = 10000
 
 	for {
 		_, err := io.ReadFull(reader, opcodeBuf[0:2])
@@ -70,6 +71,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 			fmt.Printf("[HEARTBEAT] from %d (term %d)\n", from, term)
+			node.currentLeader = from
 			node.resetElectionTimer(term)
 
 		case 0x0005: // candidate's vote request
@@ -124,7 +126,6 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			maxEntryCount := 1000000
 			if entriesCount > int32(maxEntryCount) {
 				responseFail(conn)
 				fmt.Println("[DEBUG] too mcuh entries")
@@ -350,6 +351,13 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				responseFail(conn)
 				fmt.Println("error:", err)
 			}
+
+		case 0x0011: // Client's search for the leader
+			// req: just the opcode, res: [0x0001 success][2B leader's port]
+			res := make([]byte, 2)
+			binary.BigEndian.PutUint16(res, uint16(node.currentLeader))
+			responseSuccess(conn)
+			conn.Write(res)
 		}
 
 	}

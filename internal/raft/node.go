@@ -41,12 +41,13 @@ func fromEntrySnapshots(snap []entrySnapshot) []Entry {
 }
 
 type Node struct {
-	port        int16
-	peers       []int16
-	role        string
-	currentTerm int32
-	votedFor    int16
-	voteCount   int32
+	port          int16
+	peers         []int16
+	role          string
+	currentTerm   int32
+	votedFor      int16
+	voteCount     int32
+	currentLeader int16
 
 	heartbeat     <-chan time.Time
 	electionTimer *time.Timer
@@ -67,7 +68,7 @@ type Node struct {
 }
 
 func NewNode(port int16, peers []int16) *Node {
-	randSec := 8 + rand.Intn(11)
+	randSec := 1 + rand.Intn(5)
 
 	electionTicker := time.NewTimer(time.Duration(randSec) * time.Second)
 	heartbeatTicker := time.NewTicker(5 * time.Second)

@@ -417,6 +417,7 @@ func (l *Log) writeToDisk(entries []Entry, node *Node) {
 		writeBufferPool.Put(bufPtr)
 		panic("writeToDisk failed")
 	}
+	segment.writer.Flush()
 
 	writeBufferPool.Put(bufPtr)
 }

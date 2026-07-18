@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -48,6 +49,35 @@ func (b *Broker) GetOrCreatePartition(topic string, partitionId int32, port int1
 		pmap[partitionId] = p
 	}
 	return p
+}
+
+func (node *Node) CreateTopic(topic string, numPartitions int32) error {
+	for i := range numPartitions {
+		node.broker.GetOrCreatePartition(topic, i, node.port)
+	}
+
+	if node.role == "Leader" {
+		for _, port := range node.peers {
+			conn, err := node.connPool.GetOrCreateConnection(port)
+			if err != nil {
+				continue
+			}
+
+			frame := make([]byte, 2+4+len(topic)+4)
+			off := 0
+			binary.BigEndian.PutUint16(frame[off:], 0x0012)
+			off += 2
+			binary.BigEndian.PutUint32(frame[off:], uint32(len(topic)))
+			off += 4
+			copy(frame[off:], []byte(topic))
+			off += len(topic)
+			binary.BigEndian.PutUint32(frame[off:], uint32(numPartitions))
+
+			_, err = conn.Write(frame)
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *Broker) SaveOffset(groupId, topic string, offset int64) {

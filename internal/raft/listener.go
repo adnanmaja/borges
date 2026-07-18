@@ -151,6 +151,9 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			}
 
 			log.Write(payloads, node, conn)
+			if payloads != nil {
+				fmt.Printf("Payload received")
+			}
 
 		case 0x0007: // leader's apeendLog request
 			_, err := readInt16(reader, int16Buf[:])
@@ -358,8 +361,45 @@ func (node *Node) listenForMessage(conn net.Conn) {
 			binary.BigEndian.PutUint16(res, uint16(node.currentLeader))
 			responseSuccess(conn)
 			conn.Write(res)
-		}
 
+		case 0x0012: // create topic
+			// req: [opcode][4b topic len][topic][4b num partition], res: [0x0001]
+			topic, err := parseTopic(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			numPartition, err := readInt32(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			err = node.CreateTopic(topic, numPartition)
+			if err != nil {
+				fmt.Println("error:", err)
+				responseFail(conn)
+				break
+			}
+			responseSuccess(conn)
+
+		case 0x0013: // how many partitions
+			// req: [opcode][4b topic len][topic], res [0x0001][4b partition count]
+			topic, err := parseTopic(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			partitionCount := len(node.broker.partitions[topic])
+
+			frame := make([]byte, 4)
+			binary.BigEndian.PutUint32(frame, uint32(partitionCount))
+			responseSuccess(conn)
+			conn.Write(frame)
+
+		}
 	}
 }
 

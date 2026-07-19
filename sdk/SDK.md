@@ -1,13 +1,13 @@
 # Borges Client SDK
 
-A Go client SDK for the Borges message broker. Lives in `test-client/sdk/`.
+A Go client SDK for the Borges message broker. Lives in `sdk/`.
 
 ---
 
 ## Setup
 
 ```go
-import "github.com/adnanmaja/borges/test-client/sdk"
+import "github.com/adnanmaja/borges/sdk"
 ```
 
 Create a client with a list of known broker ports. The SDK auto-discovers the leader.
@@ -99,9 +99,9 @@ if err := consumer.Err(); err != nil {
 }
 ```
 
-Offsets are committed only when you call `Commit(entry)` — useful for at-least-once semantics.
+Offsets are committed only when you call `Commit(e Entry)` — useful for at-least-once semantics.
 
-### entry type
+### Entry type
 
 Each message from the channel has:
 
@@ -162,7 +162,7 @@ Each message from the channel has:
 
 | Method | Description |
 |---|---|
-| `Start()` | Returns `<-chan entry`, begins streaming messages |
-| `Commit(entry)` | Manually commits an entry's offset (only needed when `EnableAutoCommit` is `false`) |
+| `Start()` | Returns `<-chan Entry`, begins streaming messages |
+| `Commit(e Entry)` | Manually commits an entry's offset (only needed when `EnableAutoCommit` is `false`) |
 | `Err()` | Returns any fatal error |
 | `Close()` | Stops the consumer and closes the connection |

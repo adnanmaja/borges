@@ -9,6 +9,7 @@ Nodes start as Followers, hold Elections when a leader goes quiet, and once a Le
 ## Contents
 
 - [Getting Started](#getting-started)
+- [Client SDK](#client-sdk)
 - [Benchmarking](#benchmarking)
 - [Architecture](#architecture)
 - [Node State](#node-state)
@@ -34,6 +35,17 @@ go run . -port 8082 -peers 8080,8081
 
 All nodes start as **Follower**. The first node to time out and gather a majority of votes becomes the **Leader** and begins sending periodic heartbeats to the others.
 
+## Client SDK
+
+Borges ships with a Go client SDK at [`sdk/`](sdk/SDK.md).
+
+```go
+import "github.com/adnanmaja/borges/sdk"
+```
+
+The SDK auto-discovers the cluster leader and provides `Producer` and `Consumer` types for reading and writing messages. See [`sdk/SDK.md`](sdk/SDK.md) for full docs and API reference.
+
+A smoke test is available at `tools/smoke-test/` and a benchmarking tool at `tools/bench/` (both gitignored).
 
 ## Benchmarking
 *Sending 10,000 records of 1024 Bytes, with 5 message pipelining depth and 15 records per request batch. Averaged over 10 runs*
@@ -72,16 +84,16 @@ flowchart TD
 | File | Role |
 |---|---|
 | `main.go` | CLI flag parsing, node instantiation |
-| `node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` graceful teardown, `saveStates()`/`loadStates()` binary persistence, `compactMemory()` entry cap at 1000, `snapshotEntries()`/`loadEntrySnapshot()` JSON entry persistence |
-| `heartbeat.go` | Leader sends heartbeats to peers over TCP (with 1 retry on failure) |
-| `election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`), vote request retry |
-| `listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
-| `broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence with atomic tmp+rename |
-| `log.go` | Per-topic log manager (`Log` struct), batch write/append/read functions, wire-level log transmission, CRC32-checksummed disk format, buffered batched I/O with `sync.Pool` |
-| `partition.go` | Thin wrapper around a `*Log` with a partition ID |
-| `segment.go` | Representation of individual `.log` data files (max 1MB) |
-| `index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
-| `pool.go` | `ConnPool` struct — cached TCP connections to peers with lazy creation and eviction |
+| `internal/raft/node.go` | `Node` & `Entry` structs, `NewNode()` constructor, `startLoop()` event loop, `Shutdown()` graceful teardown, `saveStates()`/`loadStates()` binary persistence, `compactMemory()` entry cap at 1000, `snapshotEntries()`/`loadEntrySnapshot()` JSON entry persistence |
+| `internal/raft/heartbeat.go` | Leader sends heartbeats to peers over TCP (with 1 retry on failure) |
+| `internal/raft/election.go` | Election campaign (`StartElection`), vote request/response (`Vote`), victory announcement (`CountVote`), vote request retry |
+| `internal/raft/listener.go` | TCP listener, opcode parsing, and dispatching client produce/consume and Raft requests |
+| `internal/raft/broker.go` | Multi-topic log registry (`Broker`), maps topic names to `Log` instances, tracks consumer-group offsets (`SaveOffset`/`FetchOffset`), periodic offset snapshot persistence with atomic tmp+rename |
+| `internal/raft/log.go` | Per-topic log manager (`Log` struct), batch write/append/read functions, wire-level log transmission, CRC32-checksummed disk format, buffered batched I/O with `sync.Pool` |
+| `internal/raft/partition.go` | Thin wrapper around a `*Log` with a partition ID |
+| `internal/raft/segment.go` | Representation of individual `.log` data files (max 1MB) |
+| `internal/raft/index.go` | Representation of individual `.index` files with binary search offsets for fast log lookups |
+| `internal/raft/pool.go` | `ConnPool` struct — cached TCP connections to peers with lazy creation and eviction |
 
 ## Node State
 

@@ -15,28 +15,28 @@ type ConsumerConfig struct {
 	EnableAutoCommit *bool
 }
 
-type consumer struct {
+type Consumer struct {
 	topic            string
 	groupId          string
 	maxBatch         int
 	conn             net.Conn
 	lastOffsets      map[int]int64
-	partitonId       *int
+	partitionId      *int
 	numPartitions    int
 	currentPartition int
-	ch               chan entry
+	ch               chan Entry
 	lastErr          error
 	autoCommit       bool
 }
 
-type entry struct {
-	timestamp int64
-	payload   []byte
-	parition  int
-	offset    int64
+type Entry struct {
+	Timestamp int64
+	Payload   []byte
+	Partition int
+	Offset    int64
 }
 
-func (client *Client) NewConsumer(config ConsumerConfig) (*consumer, error) {
+func (client *Client) NewConsumer(config ConsumerConfig) (*Consumer, error) {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", client.CurrentLeader), client.Timeout)
 	if err != nil {
 		return nil, err
@@ -49,74 +49,75 @@ func (client *Client) NewConsumer(config ConsumerConfig) (*consumer, error) {
 		autoCommit = *config.EnableAutoCommit
 	}
 
-	consumer := &consumer{
+	consumer := &Consumer{
 		topic:       config.Topic,
 		groupId:     config.GroupId,
 		maxBatch:    config.MaxBatch,
 		conn:        conn,
 		lastOffsets: make(map[int]int64),
-		partitonId:  config.PartitionId,
+		partitionId: config.PartitionId,
 		autoCommit:  autoCommit,
 	}
 
-	if consumer.partitonId == nil {
+	if consumer.partitionId == nil {
 		consumer.currentPartition = 0
 		if err := consumer.getNumPartition(consumer.topic); err != nil {
 			return nil, err
 		}
 
 		for i := range consumer.numPartitions {
-			consumer.fetchOffset(i)
+			if err = consumer.fetchOffset(i); err != nil {
+				return nil, err
+			}
 		}
 	} else {
-		consumer.currentPartition = *consumer.partitonId
+		consumer.currentPartition = *consumer.partitionId
 	}
 
 	return consumer, nil
 }
 
-func (c *consumer) Start() (<-chan entry, error) {
-	c.ch = make(chan entry, 100)
+func (c *Consumer) Start() (<-chan Entry, error) {
+	c.ch = make(chan Entry, 100)
 
 	go func() {
 		defer close(c.ch)
-		currentOffset := c.lastOffsets[c.currentPartition]
 		for i := range c.numPartitions {
-			fmt.Printf("[SDK] consuming partition %d, offset %d\n", i, currentOffset)
+			currentOffset := c.lastOffsets[i]
 			entries, err := c.consume(i, currentOffset)
 			if err != nil {
 				fmt.Println("[CONSUME] error:", err)
 				c.lastErr = err
 				return
 			}
-			if c.autoCommit {
-				if err = c.commitOffset(i, currentOffset); err != nil {
-					c.lastErr = err
-					return
-				}
-				fmt.Printf("[SDK] committed partition %d, offset %d\n", i, currentOffset)
-			}
 
 			for _, entry := range entries {
 				c.ch <- entry
-				currentOffset++
+			}
+
+			if c.autoCommit {
+				nextOffset := currentOffset + int64(len(entries))
+				if err = c.commitOffset(i, nextOffset); err != nil {
+					c.lastErr = err
+					return
+				}
 			}
 		}
 	}()
 	return c.ch, nil
 }
 
-func (c *consumer) Err() error { return c.lastErr }
+func (c *Consumer) Err() error { return c.lastErr }
 
-func (c *consumer) Commit(entry entry) error {
-	if err := c.commitOffset(entry.parition, entry.offset); err != nil {
+func (c *Consumer) Commit(e Entry) error {
+	if err := c.commitOffset(e.Partition, e.Offset); err != nil {
 		return err
 	}
 	return nil
 }
 
 // note: do a regular consume, then return them to the client one by one
-func (c *consumer) consume(parition int, offset int64) ([]entry, error) {
+func (c *Consumer) consume(partition int, offset int64) ([]Entry, error) {
 	totalSize := 2 + 2 + 4 + len(c.topic) + 4 + 8 + 4
 	reqFrame := make([]byte, totalSize)
 	off := 0
@@ -130,7 +131,7 @@ func (c *consumer) consume(parition int, offset int64) ([]entry, error) {
 	copy(reqFrame[off:], []byte(c.topic))
 	off += len(c.topic)
 
-	binary.BigEndian.PutUint32(reqFrame[off:], uint32(parition))
+	binary.BigEndian.PutUint32(reqFrame[off:], uint32(partition))
 	off += 4
 	binary.BigEndian.PutUint64(reqFrame[off:], uint64(offset))
 	off += 8
@@ -147,7 +148,11 @@ func (c *consumer) consume(parition int, offset int64) ([]entry, error) {
 	statusCode := binary.BigEndian.Uint16(resHeader[0:2])
 	entryCount := binary.BigEndian.Uint32(resHeader[2:6])
 
-	var entries []entry
+	if statusCode == 0x0002 {
+		return nil, fmt.Errorf("server replies with a fail\n")
+	}
+
+	var entries []Entry
 	for range entryCount {
 		resFrame := make([]byte, 12)
 		if _, err := io.ReadFull(c.conn, resFrame); err != nil {
@@ -160,12 +165,13 @@ func (c *consumer) consume(parition int, offset int64) ([]entry, error) {
 			return nil, err
 		}
 
-		entries = append(entries, entry{
-			timestamp: int64(timestamp),
-			payload:   payload,
-			parition:  parition,
-			offset:    offset,
+		entries = append(entries, Entry{
+			Timestamp: int64(timestamp),
+			Payload:   payload,
+			Partition: partition,
+			Offset:    offset,
 		})
+		offset++
 	}
 
 	if statusCode == 0x0001 {
@@ -174,7 +180,7 @@ func (c *consumer) consume(parition int, offset int64) ([]entry, error) {
 	return nil, fmt.Errorf("consume gone wrong\n")
 }
 
-func (c *consumer) fetchOffset(partitionId int) error {
+func (c *Consumer) fetchOffset(partitionId int) error {
 	totalSize := 2 + 4 + len(c.groupId) + 4 + len(c.topic) + 4
 
 	reqFrame := make([]byte, totalSize)
@@ -212,7 +218,7 @@ func (c *consumer) fetchOffset(partitionId int) error {
 	}
 }
 
-func (c *consumer) getNumPartition(topic string) error {
+func (c *Consumer) getNumPartition(topic string) error {
 	req := make([]byte, 2+4+len(topic))
 	binary.BigEndian.PutUint16(req[0:2], 0x0013)
 	binary.BigEndian.PutUint32(req[2:6], uint32(len(topic)))
@@ -236,7 +242,7 @@ func (c *consumer) getNumPartition(topic string) error {
 	}
 }
 
-func (c *consumer) commitOffset(partition int, offset int64) error {
+func (c *Consumer) commitOffset(partition int, offset int64) error {
 	totalSize := 2 + 4 + len(c.groupId) + 4 + len(c.topic) + 4 + 8
 	req := make([]byte, totalSize)
 	off := 0
@@ -270,6 +276,6 @@ func (c *consumer) commitOffset(partition int, offset int64) error {
 	return fmt.Errorf("commitOffset gone wrong\n")
 }
 
-func (c *consumer) Close() {
+func (c *Consumer) Close() {
 	c.conn.Close()
 }

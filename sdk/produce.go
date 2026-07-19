@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -16,13 +17,15 @@ type ProducerConfig struct {
 }
 
 type Producer struct {
-	topic         string
-	batchSize     int16
-	conn          net.Conn
-	numPartitions int
-	partitionId   *int
-	batch         [][]byte
-	stopCh        chan struct{}
+	topic             string
+	batchSize         int16
+	conn              net.Conn
+	numPartitions     int
+	partitionId       *int
+	roundRobinCounter int
+	batch             [][]byte
+	stopCh            chan struct{}
+	mu                sync.Mutex
 }
 
 func (client *Client) NewProducer(config ProducerConfig) (*Producer, error) {
@@ -40,12 +43,9 @@ func (client *Client) NewProducer(config ProducerConfig) (*Producer, error) {
 		stopCh:        make(chan struct{}),
 	}
 
-	if p.partitionId == nil {
-		zero := 0
-		p.partitionId = &zero
+	if err = p.getNumPartition(p.topic); err != nil {
+		return nil, err
 	}
-
-	p.getNumPartition(p.topic)
 
 	if config.FlushIntervalMs > 0 {
 		go p.flushLoop(time.Duration(config.FlushIntervalMs) * time.Millisecond)
@@ -55,6 +55,8 @@ func (client *Client) NewProducer(config ProducerConfig) (*Producer, error) {
 }
 
 func (c *Producer) Send(payload []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.batch = append(c.batch, payload)
 	if len(c.batch) >= int(c.batchSize) {
 		return c.Flush()
@@ -125,7 +127,9 @@ func (c *Producer) flushLoop(interval time.Duration) {
 
 func (c *Producer) Close() error {
 	close(c.stopCh)
+	c.mu.Lock()
 	c.Flush()
+	c.mu.Unlock()
 	return c.conn.Close()
 }
 
@@ -134,7 +138,9 @@ func (p *Producer) getNumPartition(topic string) error {
 	binary.BigEndian.PutUint16(req[0:2], 0x0013)
 	binary.BigEndian.PutUint32(req[2:6], uint32(len(topic)))
 	copy(req[6:], []byte(topic))
-	p.conn.Write(req)
+	if _, err := p.conn.Write(req); err != nil {
+		return err
+	}
 
 	resHeader := make([]byte, 6)
 	if _, err := io.ReadFull(p.conn, resHeader); err != nil {
@@ -158,8 +164,7 @@ func (c *Producer) getPartitionId() int {
 		return *c.partitionId
 	}
 
-	targetPartition := *c.partitionId % c.numPartitions
-	*c.partitionId++
-
-	return targetPartition
+	pid := c.roundRobinCounter % c.numPartitions
+	c.roundRobinCounter++
+	return pid
 }

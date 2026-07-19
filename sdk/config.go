@@ -19,7 +19,7 @@ type Client struct {
 	Timeout       time.Duration
 }
 
-func ClientConfig(brokers []string, timeout ...time.Duration) *Config {
+func NewConfig(brokers []string, timeout ...time.Duration) *Config {
 	connTimeout := 5 * time.Second
 	if len(timeout) > 0 {
 		connTimeout = timeout[0]
@@ -57,7 +57,9 @@ func findLeader(c *Config) (int16, error) {
 
 		reqFrame := make([]byte, 2)
 		binary.BigEndian.PutUint16(reqFrame, 0x0011)
-		conn.Write(reqFrame)
+		if _, err := conn.Write(reqFrame); err != nil {
+			return 0, err
+		}
 
 		resFrame := make([]byte, 4)
 		_, err = io.ReadFull(conn, resFrame)

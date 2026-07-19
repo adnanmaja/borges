@@ -8,6 +8,7 @@ logs
 client
 stress/
 client/kafka
+tools
 *.py
 data
 

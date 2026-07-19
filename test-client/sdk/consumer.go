@@ -8,10 +8,11 @@ import (
 )
 
 type ConsumerConfig struct {
-	Topic       string
-	GroupId     string
-	MaxBatch    int
-	PartitionId *int
+	Topic            string
+	GroupId          string
+	MaxBatch         int
+	PartitionId      *int
+	EnableAutoCommit *bool
 }
 
 type consumer struct {
@@ -25,17 +26,27 @@ type consumer struct {
 	currentPartition int
 	ch               chan entry
 	lastErr          error
+	autoCommit       bool
 }
 
 type entry struct {
 	timestamp int64
 	payload   []byte
+	parition  int
+	offset    int64
 }
 
 func (client *Client) NewConsumer(config ConsumerConfig) (*consumer, error) {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", client.CurrentLeader), client.Timeout)
 	if err != nil {
 		return nil, err
+	}
+
+	var autoCommit bool
+	if config.EnableAutoCommit == nil {
+		autoCommit = true
+	} else {
+		autoCommit = *config.EnableAutoCommit
 	}
 
 	consumer := &consumer{
@@ -45,6 +56,7 @@ func (client *Client) NewConsumer(config ConsumerConfig) (*consumer, error) {
 		conn:        conn,
 		lastOffsets: make(map[int]int64),
 		partitonId:  config.PartitionId,
+		autoCommit:  autoCommit,
 	}
 
 	if consumer.partitonId == nil {
@@ -77,11 +89,13 @@ func (c *consumer) Start() (<-chan entry, error) {
 				c.lastErr = err
 				return
 			}
-			if err = c.commitOffset(i, currentOffset); err != nil {
-				c.lastErr = err
-				return
+			if c.autoCommit {
+				if err = c.commitOffset(i, currentOffset); err != nil {
+					c.lastErr = err
+					return
+				}
+				fmt.Printf("[SDK] committed partition %d, offset %d\n", i, currentOffset)
 			}
-			fmt.Printf("[SDK] committed partition %d, offset %d\n", i, currentOffset)
 
 			for _, entry := range entries {
 				c.ch <- entry
@@ -93,6 +107,13 @@ func (c *consumer) Start() (<-chan entry, error) {
 }
 
 func (c *consumer) Err() error { return c.lastErr }
+
+func (c *consumer) Commit(entry entry) error {
+	if err := c.commitOffset(entry.parition, entry.offset); err != nil {
+		return err
+	}
+	return nil
+}
 
 // note: do a regular consume, then return them to the client one by one
 func (c *consumer) consume(parition int, offset int64) ([]entry, error) {
@@ -139,7 +160,12 @@ func (c *consumer) consume(parition int, offset int64) ([]entry, error) {
 			return nil, err
 		}
 
-		entries = append(entries, entry{timestamp: int64(timestamp), payload: payload})
+		entries = append(entries, entry{
+			timestamp: int64(timestamp),
+			payload:   payload,
+			parition:  parition,
+			offset:    offset,
+		})
 	}
 
 	if statusCode == 0x0001 {

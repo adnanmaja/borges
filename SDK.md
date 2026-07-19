@@ -51,6 +51,8 @@ producer.Flush() // flush any remaining buffered messages
 
 ## Consuming messages
 
+### Auto-commit (default)
+
 ```go
 consumer, err := client.NewConsumer(sdk.ConsumerConfig{
     Topic:    "orders",
@@ -73,6 +75,32 @@ if err := consumer.Err(); err != nil {
 
 `Consumer` discovers all partitions for the topic, picks up from the last committed offset for the group, and streams messages through a channel. Offsets are committed automatically after each fetch. `Start()` blocks the caller — run it in a goroutine if you need concurrent work.
 
+### Manual commit
+
+```go
+consumer, err := client.NewConsumer(sdk.ConsumerConfig{
+    Topic:            "orders",
+    GroupId:          "my-group",
+    MaxBatch:         100,
+    EnableAutoCommit: boolPtr(false),
+})
+if err != nil {
+    // topic not found
+}
+defer consumer.Close()
+
+for msg := range consumer.Start() {
+    process(msg)
+    consumer.Commit(msg) // commit offset after processing
+}
+
+if err := consumer.Err(); err != nil {
+    // consumer exited with error
+}
+```
+
+Offsets are committed only when you call `Commit(entry)` — useful for at-least-once semantics.
+
 ### entry type
 
 Each message from the channel has:
@@ -81,6 +109,8 @@ Each message from the channel has:
 |---|---|---|
 | `Timestamp` | `int64` | Millisecond Unix timestamp |
 | `Payload` | `[]byte` | Message body |
+| `Partition` | `int` | Partition the message came from |
+| `Offset` | `int64` | Offset within the partition |
 
 ---
 
@@ -126,11 +156,13 @@ Each message from the channel has:
 | `GroupId` | `string` | required | Consumer group for offset tracking |
 | `MaxBatch` | `int` | `100` | Max messages per fetch |
 | `PartitionId` | `int` | `-1` | Pin a partition (< 0 = all partitions) |
+| `EnableAutoCommit` | `*bool` | `true` | Auto-commit offsets after fetch (set `false` for manual commit) |
 
 ### Consumer methods
 
 | Method | Description |
 |---|---|
 | `Start()` | Returns `<-chan entry`, begins streaming messages |
+| `Commit(entry)` | Manually commits an entry's offset (only needed when `EnableAutoCommit` is `false`) |
 | `Err()` | Returns any fatal error |
 | `Close()` | Stops the consumer and closes the connection |

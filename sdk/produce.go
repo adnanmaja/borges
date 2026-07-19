@@ -151,6 +151,9 @@ func (p *Producer) getNumPartition(topic string) error {
 	partitionCount := binary.BigEndian.Uint32(resHeader[2:6])
 
 	p.numPartitions = int(partitionCount)
+	if p.numPartitions == 0 {
+		return fmt.Errorf("topic didnt exist yet.")
+	}
 
 	if successCode == 0x0001 {
 		return nil
@@ -164,6 +167,7 @@ func (c *Producer) getPartitionId() int {
 		return *c.partitionId
 	}
 
+	fmt.Println("[DEBUG] numParitions:", c.numPartitions)
 	pid := c.roundRobinCounter % c.numPartitions
 	c.roundRobinCounter++
 	return pid

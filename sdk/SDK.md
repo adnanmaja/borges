@@ -129,6 +129,7 @@ Each message from the channel has:
 |---|---|
 | `NewProducer(cfg)` | Creates a producer for a topic |
 | `NewConsumer(cfg)` | Creates a consumer for a topic + group |
+| `CreateTopic(topic, numPartitions)` | Creates a topic with the given number of partitions |
 | `Close()` | Tears down connections |
 
 ### ProducerConfig

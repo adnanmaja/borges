@@ -76,6 +76,6 @@ func findLeader(c *Config) (int16, error) {
 	return 0, fmt.Errorf("cant find the leader")
 }
 
-func (c *Client) Close() {
+func (client *Client) Close() {
 	fmt.Println("Closed, definetely")
 }

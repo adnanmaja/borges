@@ -152,7 +152,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 
 			log.Write(payloads, node, conn)
 			if payloads != nil {
-				fmt.Printf("Payload received")
+				fmt.Println("Payload received")
 			}
 
 		case 0x0007: // leader's apeendLog request
@@ -313,13 +313,19 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
+			partitionId, err := readInt32(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
 			offsetCommit, err := readInt64(reader, int64Buf[:])
 			if err != nil {
 				fmt.Println("error:", err)
 				break
 			}
 
-			node.broker.SaveOffset(groupId, topic, offsetCommit)
+			node.broker.SaveOffset(groupId, topic, partitionId, offsetCommit)
 
 			responseSuccess(conn)
 
@@ -343,8 +349,13 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				break
 			}
 
-			offset := node.broker.FetchOffset(groupId, topic)
-			fmt.Println("[DEBUG] abi nuppp ")
+			partitionId, err := readInt32(reader, int32Buf[:])
+			if err != nil {
+				fmt.Println("error:", err)
+				break
+			}
+
+			offset := node.broker.FetchOffset(groupId, topic, partitionId)
 
 			resFrame := make([]byte, 10)
 			binary.BigEndian.PutUint16(resFrame[0:2], 0x0001)
@@ -355,7 +366,7 @@ func (node *Node) listenForMessage(conn net.Conn) {
 				fmt.Println("error:", err)
 			}
 
-		case 0x0011: // Client's search for the leader
+		case 0x0011: // client's search for the leader
 			// req: just the opcode, res: [0x0001 success][2B leader's port]
 			res := make([]byte, 2)
 			binary.BigEndian.PutUint16(res, uint16(node.currentLeader))

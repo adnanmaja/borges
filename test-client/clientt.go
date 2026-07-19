@@ -1,6 +1,10 @@
 package main
 
-import "github.com/adnanmaja/borges/test-client/sdk"
+import (
+	"fmt"
+
+	"github.com/adnanmaja/borges/test-client/sdk"
+)
 
 func main() {
 	brokers := []string{"8080", "8081", "8082"}
@@ -18,17 +22,7 @@ func main() {
 		panic(err)
 	}
 
-	payload := `[Verse 1: Harry, Liam]
-Remember when we would stay out too late
-We were young, havin' fun, made mistakes
-Did we ever know? Did we ever know?
-Did we ever know? Yeah
-All the things we'd just think of and say
-Never wrong, always right, not afraid
-Did we ever know? Did we ever know?
-Did we ever know?
-
-[Pre-Chorus: Zayn]
+	payload := `[Pre-Chorus: Zayn]
 Is it all inside of my head?
 Maybe you still think I don't care
 But all I need is you
@@ -48,4 +42,25 @@ Where we are`
 		panic(err)
 	}
 	producer.Close()
+
+	consumer, err := client.NewConsumer(sdk.ConsumerConfig{
+		Topic:    "test",
+		GroupId:  "group",
+		MaxBatch: 100,
+	})
+
+	msgs, err := consumer.Start()
+	if err != nil {
+		panic(err)
+	}
+
+	for msg := range msgs {
+		fmt.Println("Message:", msg)
+	}
+
+	if err := consumer.Err(); err != nil {
+		fmt.Println("[SDK] consumer error:", err)
+	}
+
+	consumer.Close()
 }

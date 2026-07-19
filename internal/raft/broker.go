@@ -11,14 +11,14 @@ import (
 
 type Broker struct {
 	partitions map[string]map[int32]*Partition
-	offsets    map[string]map[string]int64
+	offsets    map[string]map[string]map[int32]int64
 	mu         sync.RWMutex
 }
 
 func NewBroker() *Broker {
 	return &Broker{
 		partitions: make(map[string]map[int32]*Partition),
-		offsets:    make(map[string]map[string]int64),
+		offsets:    make(map[string]map[string]map[int32]int64),
 	}
 }
 
@@ -80,25 +80,30 @@ func (node *Node) CreateTopic(topic string, numPartitions int32) error {
 	return nil
 }
 
-func (b *Broker) SaveOffset(groupId, topic string, offset int64) {
+func (b *Broker) SaveOffset(groupId, topic string, partitionId int32, offset int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	_, exists := b.offsets[groupId]
 	if !exists {
-		b.offsets[groupId] = make(map[string]int64)
+		b.offsets[groupId] = make(map[string]map[int32]int64)
 	}
 
-	b.offsets[groupId][topic] = offset
+	_, exists = b.offsets[groupId][topic]
+	if !exists {
+		b.offsets[groupId][topic] = make(map[int32]int64)
+	}
+
+	b.offsets[groupId][topic][partitionId] = offset
 }
 
-func (b *Broker) FetchOffset(groupId, topic string) int64 {
+func (b *Broker) FetchOffset(groupId, topic string, partitionId int32) int64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
 	groupMap, exists := b.offsets[groupId]
 	if exists {
-		return groupMap[topic]
+		return groupMap[topic][partitionId]
 	}
 
 	return 0
@@ -174,7 +179,7 @@ func (node *Node) loadSnapshot(b *Broker) error {
 	snapshotPath := fmt.Sprintf("data/%d/offset_snapshot.json", node.port)
 
 	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
-		b.offsets = make(map[string]map[string]int64)
+		b.offsets = make(map[string]map[string]map[int32]int64)
 		return nil
 	}
 

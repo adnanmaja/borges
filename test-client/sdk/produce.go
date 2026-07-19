@@ -25,8 +25,8 @@ type Producer struct {
 	stopCh        chan struct{}
 }
 
-func (c *Client) NewProducer(config ProducerConfig) (*Producer, error) {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", c.CurrentLeader), c.Timeout)
+func (client *Client) NewProducer(config ProducerConfig) (*Producer, error) {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", client.CurrentLeader), client.Timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -54,25 +54,25 @@ func (c *Client) NewProducer(config ProducerConfig) (*Producer, error) {
 	return p, nil
 }
 
-func (p *Producer) Send(payload []byte) error {
-	p.batch = append(p.batch, payload)
-	if len(p.batch) >= int(p.batchSize) {
-		return p.Flush()
+func (c *Producer) Send(payload []byte) error {
+	c.batch = append(c.batch, payload)
+	if len(c.batch) >= int(c.batchSize) {
+		return c.Flush()
 	}
 	return nil
 }
-func (p *Producer) Flush() error {
-	if len(p.batch) == 0 {
+func (c *Producer) Flush() error {
+	if len(c.batch) == 0 {
 		return nil
 	}
-	batch := p.batch
-	p.batch = nil
-	return p.write(batch)
+	batch := c.batch
+	c.batch = nil
+	return c.write(batch)
 }
 
-func (p *Producer) write(batch [][]byte) error {
+func (c *Producer) write(batch [][]byte) error {
 	// opcode(2) + from(2) + topicLen(4) + topic(N) + partitionId(4) + entriesCount(4)
-	totalSize := 2 + 2 + 4 + len(p.topic) + 4 + 4
+	totalSize := 2 + 2 + 4 + len(c.topic) + 4 + 4
 	for _, payload := range batch {
 		totalSize += 4 + len(payload)
 	}
@@ -82,11 +82,11 @@ func (p *Producer) write(batch [][]byte) error {
 	off += 2
 	binary.BigEndian.PutUint16(frame[off:], 0)
 	off += 2
-	binary.BigEndian.PutUint32(frame[off:], uint32(len(p.topic)))
+	binary.BigEndian.PutUint32(frame[off:], uint32(len(c.topic)))
 	off += 4
-	copy(frame[off:], p.topic)
-	off += len(p.topic)
-	partitionId := p.getPartitionId()
+	copy(frame[off:], c.topic)
+	off += len(c.topic)
+	partitionId := c.getPartitionId()
 	binary.BigEndian.PutUint32(frame[off:], uint32(partitionId))
 	off += 4
 	binary.BigEndian.PutUint32(frame[off:], uint32(len(batch)))
@@ -97,36 +97,36 @@ func (p *Producer) write(batch [][]byte) error {
 		copy(frame[off:], payload)
 		off += len(payload)
 	}
-	if _, err := p.conn.Write(frame); err != nil {
+	if _, err := c.conn.Write(frame); err != nil {
 		return err
 	}
 	resFrame := make([]byte, 2)
-	if _, err := io.ReadFull(p.conn, resFrame); err != nil {
+	if _, err := io.ReadFull(c.conn, resFrame); err != nil {
 		return err
 	}
 	if binary.BigEndian.Uint16(resFrame) != 0x0001 {
-		return fmt.Errorf("produce failed, figure out why yourself")
+		return fmt.Errorf("produce failed, figure out why yourself\n")
 	}
 	return nil
 }
 
-func (p *Producer) flushLoop(interval time.Duration) {
+func (c *Producer) flushLoop(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			p.Flush()
-		case <-p.stopCh:
+			c.Flush()
+		case <-c.stopCh:
 			return
 		}
 	}
 }
 
-func (p *Producer) Close() error {
-	close(p.stopCh)
-	p.Flush()
-	return p.conn.Close()
+func (c *Producer) Close() error {
+	close(c.stopCh)
+	c.Flush()
+	return c.conn.Close()
 }
 
 func (p *Producer) getNumPartition(topic string) error {
@@ -153,13 +153,13 @@ func (p *Producer) getNumPartition(topic string) error {
 	}
 }
 
-func (p *Producer) getPartitionId() int {
-	if p.partitionId != nil {
-		return *p.partitionId
+func (c *Producer) getPartitionId() int {
+	if c.partitionId != nil {
+		return *c.partitionId
 	}
 
-	targetPartition := *p.partitionId % p.numPartitions
-	*p.partitionId++
+	targetPartition := *c.partitionId % c.numPartitions
+	*c.partitionId++
 
 	return targetPartition
 }

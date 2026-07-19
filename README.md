@@ -176,6 +176,8 @@ Response frames consist of a single 2-byte status/response code.
 | `0x0008` | Client Consume | Client → Node | Client requests log entries by topic, offset, and count |
 | `0x0009` | Commit Offset | Client → Node | Client commits a consumer offset for a group/topic |
 | `0x0010` | Fetch Offset | Client → Node | Client retrieves a previously committed offset for a group/topic |
+| `0x0012` | Create Topic | Client → Node | Client creates a topic with a given number of partitions |
+| `0x0013` | Partitions Count | Client → Node | Client queries the number of partitions for a topic |
 
 #### Client Produce (`0x0006`)
 
@@ -245,6 +247,7 @@ Response — failure (`0x0002`): a single 2-byte status code.
 | groupId | `groupIdLen` bytes | Consumer group identifier |
 | topicLen | 4B | Length of the topic name |
 | topic | `topicLen` bytes | Topic name |
+| partition id | 4B | in which partition this offset should be stored at |
 | offsetCommit | 8B | Offset value to commit for this group/topic |
 
 Response: a single 2-byte status code.
@@ -259,6 +262,7 @@ Request:
 | groupId | `groupIdLen` bytes | Consumer group identifier |
 | topicLen | 4B | Length of the topic name |
 | topic | `topicLen` bytes | Topic name |
+| partition id | 4B | from which partition |
 
 Response:
 
@@ -266,6 +270,52 @@ Response:
 |---|---|---|
 | status | 2B | `0x0001` on success |
 | offset | 8B | The committed offset |
+
+#### Create Topic (`0x0012`)
+
+Used by clients to programmatically create a topic. If the receiving node is the leader, it creates the partitions locally and propagates the creation to all followers. Followers apply the creation locally on receipt.
+
+Request:
+
+| Field | Size | Description |
+|---|---|---|
+| opcode | 2B | `0x0012` |
+| from | 2B | Sender identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic to create |
+| numPartitions | 4B | Number of partitions for this topic |
+
+Response: a single 2-byte status code.
+
+Propagation frame (leader → follower):
+
+| Field | Size | Description |
+|---|---|---|
+| opcode | 2B | `0x0012` |
+| from | 2B | Sender identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic to create |
+| numPartitions | 4B | Number of partitions for this topic |
+
+#### Partitions Count (`0x0013`)
+
+Queries the number of partitions for a given topic.
+
+Request:
+
+| Field | Size | Description |
+|---|---|---|
+| opcode | 2B | `0x0013` |
+| from | 2B | Sender identifier |
+| topicLen | 4B | Length of the topic name |
+| topic | `topicLen` bytes | Topic to query |
+
+Response:
+
+| Field | Size | Description |
+|---|---|---|
+| status | 2B | `0x0001` on success |
+| partitionCount | 4B | Number of partitions for the topic |
 
 ### Response / status codes (common)
 
@@ -324,7 +374,7 @@ Log persistence is segmented, with accompanying index files to optimize retrieva
    | payload | `payloadLen` bytes |
 
    The 4-byte CRC32 checksum covers the entry payload and is verified on read — entries with mismatched checksums return a corruption error.
-4. **Batch writes** — `writeToDisk` accepts multiple entries in a single call and encodes them into one pre-allocated buffer from a shared `sync.Pool`, reducing heap allocations. The companion index entries are also written in one batch.
+4. **Batch writes** — `writeToDisk` accepts multiple entries in a single call and encodes them into one pre-allocated buffer from a shared `sync.Pool`, reducing heap allocations. The companion index entries are also written in one batch. After each batch, the buffered writer is explicitly flushed to disk.
 5. **File descriptor cache** — the `Log` maintains an `fdCache` mapping index and segment paths to open `*os.File` handles, avoiding redundant `os.Open` calls during consumer reads.
 6. **Startup recovery** — on startup, a node creates per-topic, per-partition directories under `data/<port>/log/<topic>/<partitionId>/`. The in-memory Raft log (`node.entries`) is recovered from `data/<port>/entry_snapshot.json` (see [Entry snapshot](#entry-snapshot-snapshotentries--loadentrysnapshot)), preserving term history for Raft consistency checks.
 
